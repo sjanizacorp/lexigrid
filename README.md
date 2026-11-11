@@ -2,8 +2,8 @@
 
 LexiGrid is a governance, risk, and compliance application for client-managed deployments.
 
-[Download the client distribution](https://github.com/sjanizacorp/lexigrid/releases/latest)
+Open [START_HERE.md](START_HERE.md) for a fresh Linux and PostgreSQL installation. The [product manual index](docs/MANUAL_INDEX.md) links to the PDF guides.
 
-The package includes the Linux/PostgreSQL application, deployment scripts, and product manuals. After extracting it, open `LexiGrid/START_HERE.md` for installation and commissioning instructions.
+[Download the packaged distribution](https://github.com/sjanizacorp/lexigrid/releases/latest) to install from a ZIP.
 
 Shahryar Jahangir · Aniza Inc.

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# An extracted release can install to a different directory. Redirect its CLI
+# only when that destination is a verified LexiGrid installation.
+if [[ ! -f "$ROOT/.env.native" && -f "$ROOT/.lexigrid-install-target" ]]; then
+  IFS= read -r TARGET < "$ROOT/.lexigrid-install-target"
+  if [[ "$TARGET" == /* && "$TARGET" != "$ROOT" && -f "$TARGET/VERSION" && -f "$TARGET/lexictl" && -f "$TARGET/.env.native" ]]; then
+    printf 'Using installed LexiGrid at: %s\n' "$TARGET" >&2
+    exec "$TARGET/lexictl" "$@"
+  fi
+fi
+exec python3 "$ROOT/scripts/lexictl.py" "$@"

@@ -1,0 +1,806 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LexiGrid | Enterprise IRM</title><style>
+:root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#e9effc;background:#0b1220}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:8px;padding:10px 15px;background:#3c79ee;color:white}input[type=checkbox]{width:auto;margin:5px 8px 5px 0;vertical-align:middle}button:hover{filter:brightness(1.12)}input,select,textarea{background:#121f34;border:1px solid #35445c;color:#eaf1fc;border-radius:7px;padding:10px;width:100%;margin:5px 0 12px}textarea{min-height:95px}label{font-size:12px;color:#aabbd5}h1,h2,h3{margin-top:0}h1{font-size:26px}h2{font-size:20px}p{color:#a7b6ce}.layout{display:flex;min-height:100vh}.sidebar{width:245px;flex-shrink:0;background:#0e1a2d;padding:25px 15px;border-right:1px solid #25344a}.brand{font-size:26px;font-weight:800;letter-spacing:-1px;color:#fff;padding:4px 12px 30px}.brand span{color:#69a6ff}.nav{width:100%;text-align:left;background:transparent;color:#afbed4;margin:3px 0}.nav.active,.nav:hover{background:#20385a;color:#fff}.main{flex:1;min-width:0;padding:30px 40px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px}.card{background:#132137;border:1px solid #2b3d56;border-radius:13px;padding:22px;margin:14px 0;box-shadow:0 8px 25px #0002}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.metric{font-size:30px;font-weight:750;color:#fff}.muted{font-size:12px;color:#9aaecb}.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.toolbar input{max-width:280px}.tablewrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th{text-align:left;color:#9cb2d0;border-bottom:1px solid #34465e}td,th{padding:12px 10px;border-bottom:1px solid #26364c}td{max-width:340px;word-break:break-word}.tag{border-radius:30px;background:#243c59;padding:5px 9px;font-size:12px;display:inline-block}.modal{position:fixed;inset:0;background:#030913c9;display:none;align-items:center;justify-content:center;z-index:3;padding:15px}.modal.show{display:flex}.dialog{background:#14243b;border:1px solid #405474;border-radius:14px;padding:26px;width:min(570px,100%);max-height:90vh;overflow:auto}.error{color:#ffaaa9;white-space:pre-wrap}.success{color:#91edc0}.login{max-width:440px;margin:9vh auto}.login h1{font-size:36px}.footer{margin-top:50px;font-size:11px;color:#7186a5}.heat{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;max-width:560px}.cell{border-radius:7px;text-align:center;padding:22px 5px;font-weight:700;background:#25436b}.cell.high{background:#77552e}.cell.critical{background:#77313e}.cell.low{background:#24594d}@media(max-width:800px){.layout{display:block}.sidebar{width:auto}.main{padding:20px}.nav{width:auto}.brand{padding-bottom:10px}}
+</style></head><body><div id="root"></div><div id="modal" class="modal"><div class="dialog"><div class="toolbar" style="justify-content:space-between"><h2 id="modal-title"></h2><button onclick="closeModal()">✕</button></div><div id="modal-body"></div></div></div><script>
+const root=document.getElementById('root');let token=sessionStorage.getItem('lexigrid_token')||'',tenant=sessionStorage.getItem('lexigrid_tenant')||'',role='',page='Dashboard',cache={};const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,method='GET',data,credential=token,operationId){
+ let r=await fetch(path,{method,headers:{'Authorization':'Bearer '+credential,...(data?{'Content-Type':'application/json'}:{}),...(operationId?{'X-LexiGrid-Operation-ID':operationId}:{})},body:data?JSON.stringify(data):undefined});
+ let v=await r.json().catch(()=>({}));
+ if(!r.ok){const reference=r.headers.get('X-Request-ID')||v.request_id;const error=Error((v.detail?JSON.stringify(v.detail):`HTTP ${r.status}`)+(reference?` (request ${reference})`:''));error.status=r.status;error.requestId=reference;throw error}return v
+}
+function reportImportInterfaceError(event){
+ if(!['Document Extraction','Bulk Import'].includes(page)||!token)return;
+ const activity=page==='Document Extraction'?'reviewed_import':'bulk_import';
+ const kind=document.getElementById(page==='Document Extraction'?'docKind':'bulkKind')?.value||'requirements';
+ const operationId=crypto.randomUUID(),status=document.getElementById(page==='Document Extraction'?'docStatus':'bulkResult');
+ if(status){status.textContent='An interface error prevented completion. Check the target records before retrying. Reference: '+operationId;status.className='error'}
+ api('/api/client-events','POST',{activity,event:'client_error',kind,selected_count:0,line:Number.isInteger(event.lineno)?Math.min(Math.max(event.lineno,0),100000):0},token,operationId).catch(()=>console.warn('Client diagnostic could not be recorded'));
+}
+window.addEventListener('error',reportImportInterfaceError);
+window.addEventListener('unhandledrejection',reportImportInterfaceError);
+
+function ssoStartUrl(protocol,tenantId){
+ if(!['oidc','saml'].includes(protocol))throw Error('Unsupported sign-in provider');
+ return '/api/auth/'+protocol+'/start?'+new URLSearchParams({tenant_id:tenantId,ui:'true'});
+}
+function startSso(protocol,tenantId){location.assign(ssoStartUrl(protocol,tenantId))}
+async function loadSsoProviders(container){
+ try{
+  const providers=await api('/api/auth/providers');
+  if(!container.isConnected)return;
+  const choice=document.getElementById('tenant-choice');
+  for(const provider of providers){
+   if(!['oidc','saml'].includes(provider.protocol))continue;
+   const button=document.createElement('button');button.type='button';button.style.margin='6px';
+   button.textContent='Sign in with '+provider.label;button.dataset.sso=provider.protocol;
+   button.onclick=()=>{if(!choice.value){choice.reportValidity();return}startSso(provider.protocol,choice.value)};
+   container.append(button);
+  }
+ }catch(error){if(container.isConnected)container.textContent='Organization SSO options unavailable. Refresh to retry.'}
+}
+async function loginScreen(msg=''){root.innerHTML=`<div class="login card"><h1>Lexi<span style="color:#69a6ff">Grid</span></h1><p>Integrated Risk Management · Secure sign in</p><form id="login"><label>Organization / Tenant<select name="tenant_id" id="tenant-choice" required><option value="">Loading tenants…</option></select></label><label>Email<input name="email" type="email" required></label><label>Password<input name="password" type="password" required></label><label>Authenticator code (if enabled)<input name="totp_code" inputmode="numeric" maxlength="32" placeholder="6-digit code (optional)"></label><button>Sign in</button><p class="error">${esc(msg)}</p></form><div id="sso-login"></div><div class="footer">Developed by Shahryar Jahangir · Aniza Inc.</div></div>`;loadSsoProviders(document.getElementById('sso-login'));try{let rows=await api('/api/auth/tenants');let el=document.getElementById('tenant-choice');el.innerHTML='<option value="">Select organization</option>'+rows.map(t=>`<option value="${esc(t.id)}" ${t.id===tenant?'selected':''}>${esc(t.name)}</option>`).join('')}catch(err){document.getElementById('tenant-choice').innerHTML='<option value="">Unable to load tenants</option>';root.querySelector('.error').textContent=err.message}document.getElementById('login').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('button');if(button.disabled)return;button.disabled=true;let x=Object.fromEntries(new FormData(e.target));if(!x.totp_code)delete x.totp_code;try{let v=await api('/api/auth/login','POST',x);tenant=v.tenant_id;sessionStorage.setItem('lexigrid_tenant',tenant);if(v.mfa_enrollment_required){const login=e.target;await openMfaEnrollment(v.enrollment_token,()=>login.isConnected&&!token);return}token=v.access_token;sessionStorage.setItem('lexigrid_token',token);await shell()}catch(err){loginScreen(err.message)}finally{button.disabled=false}}}
+
+const pages=['Dashboard','Risks','Risk Acceptance','Controls','Frameworks','Requirements','Policies','Approvals','Remediations','Vendors','Business Services','Loss Events','Audit','Compliance Audits','Security','Administration','Email Configuration','Reports','Risk Assessment','Exports','Enterprise IRM','Workflows','Bulk Import','Document Extraction'];async function shell(){try{let me=await api('/api/me');role=me.role;window.lexigridUserId=me.id;window.lexigridUserEmail=me.email.toLowerCase();root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="brand">Lexi<span>Grid</span></div><div class="muted" style="padding:0 12px 14px">ENTERPRISE IRM</div>${pages.map(p=>`<button class="nav" data-page="${p}">${p}</button>`).join('')}<div class="footer">Shahryar Jahangir<br>Aniza Inc.<br><br>${esc(me.email)}<br>${esc(role)}</div></aside><main class="main"><div class="top"><div><div class="muted">WORKSPACE / <span id="breadcrumb"></span></div><h1 id="heading"></h1></div><button id="logout">Sign out</button></div><div id="content"></div></main></div>`;document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>navigate(b.dataset.page));document.getElementById('logout').onclick=async()=>{try{await api('/api/auth/logout','POST',{})}catch(e){console.warn('Logout audit request failed',e)}sessionStorage.removeItem('lexigrid_token');token='';loginScreen()};await navigate(page)}catch(e){loginScreen(e.message)}}
+async function navigate(p){page=p;document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('active',x.dataset.page===p));document.getElementById('heading').textContent=p;document.getElementById('breadcrumb').textContent=p;closeModal();const previous=document.getElementById('content');const c=previous.cloneNode(false);previous.replaceWith(c);c.innerHTML='<p>Loading…</p>';try{if(p==='Dashboard')await dashboard(c);else if(p==='Risks')await risks(c);else if(p==='Risk Acceptance')await riskAcceptanceQueue(c);else if(p==='Controls')await generic(c,'/api/controls',['code','title','owner','status'],'New control',controlForm);else if(p==='Frameworks')await frameworksPage(c);else if(p==='Requirements')await requirementsPage(c);else if(p==='Policies')await generic(c,'/api/policies',['code','title','owner','status'],'New policy',policyForm);else if(p==='Approvals')await approvals(c);else if(p==='Remediations')await remediations(c);else if(p==='Vendors')await generic(c,'/api/vendors',['name','service','criticality','owner','status'],'New vendor',vendorForm);else if(p==='Business Services')await generic(c,'/api/business-services',['name','owner','criticality','recovery_time_hours','recovery_point_hours'],'New service',serviceForm);else if(p==='Loss Events')await generic(c,'/api/loss-events',['title','occurred_on','loss_cents','service_id'],'New loss event',lossForm);else if(p==='Audit')await generic(c,'/api/audit',['at','action','actor_id','object_id'],null,null);else if(p==='Compliance Audits')await compliancePage(c);else if(p==='Security')await securityPage(c);else if(p==='Administration')await administration(c);else if(p==='Email Configuration')await mailConfigurationPage(c);else if(p==='Reports')await reportsPage(c);else if(p==='Risk Assessment')await riskMethodPage(c);else if(p==='Exports')await exportsPage(c);else if(p==='Enterprise IRM')await enterprisePage(c);else if(p==='Workflows')await workflowPage(c);else if(p==='Bulk Import')await bulkImportPage(c);else if(p==='Document Extraction')await documentExtractionPage(c)}catch(e){c.innerHTML=`<div class="card error">${esc(e.message)}</div>`}}
+function table(items,fields,action){if(!items.length)return '<p>No records found.</p>';return `<div class="tablewrap"><table><thead><tr>${fields.map(f=>`<th>${esc(f.replaceAll('_',' '))}</th>`).join('')}${action?'<th>Action</th>':''}</tr></thead><tbody>${items.map((x,i)=>`<tr>${fields.map(f=>`<td>${esc(typeof x[f]==='object'?JSON.stringify(x[f]):x[f])}</td>`).join('')}${action?`<td><button class="row-action" data-i="${i}">${esc(action.label)}</button></td>`:''}</tr>`).join('')}</tbody></table></div>`}
+function wireActions(c,items,action){if(action)c.querySelectorAll('.row-action').forEach(b=>b.onclick=()=>action.run(items[+b.dataset.i]))}
+function openModal(title,html){document.getElementById('modal-title').textContent=title;document.getElementById('modal-body').innerHTML=html;document.getElementById('modal').classList.add('show')}
+function closeModal(){document.getElementById('modal').classList.remove('show')}
+function modalContentIsCurrent(element){return element.isConnected&&element.closest('.modal').classList.contains('show')}
+function wireSaveForm(save){
+ const form=document.getElementById('edit-form');
+ const button=form.querySelector('button');
+ const error=form.querySelector('#form-error');
+ form.onsubmit=async event=>{
+  event.preventDefault();
+  if(button.disabled)return;
+  const data=Object.fromEntries(new FormData(form));
+  button.disabled=true;
+  error.textContent='';
+  try{
+   await save(data);
+   if(modalContentIsCurrent(form)){closeModal();await navigate(page)}
+  }catch(err){
+   error.textContent=err.message;
+  }finally{
+   button.disabled=false;
+  }
+ };
+}
+function form(title,fields,save){openModal(title,`<form id="edit-form">${fields.map(([key,label,type='text',options=''])=>`<label>${esc(label)}${type==='textarea'?`<textarea name="${key}" required></textarea>`:type==='select'?`<select name="${key}">${options.split('|').map(x=>`<option>${esc(x)}</option>`).join('')}</select>`:`<input name="${key}" type="${type}" required>`}</label>`).join('')}<button>Save</button><p id="form-error" class="error"></p></form>`);wireSaveForm(save)}
+const EDIT_SPECS={
+ '/api/controls':{roles:['tenant_admin','risk_manager'],fields:[['code','Control code'],['title','Title'],['description','Description','textarea'],['owner','Owner'],['status','Status','select','planned|implemented|retired']],endpoint:r=>`/api/controls/${r.id}/details`,method:'PATCH',version:true},
+ '/api/frameworks':{roles:['tenant_admin','risk_manager'],fields:[['name','Framework name'],['revision','Revision']],endpoint:r=>`/api/frameworks/${r.id}`,method:'PATCH',version:true},
+ '/api/policies':{roles:['tenant_admin','risk_manager'],fields:[['code','Policy code'],['title','Title'],['body','Policy text','textarea'],['owner','Owner']],endpoint:r=>`/api/policies/${r.id}/details`,method:'PATCH',version:true,allowed:r=>r.status==='draft'},
+};
+function editForm(title,fields,record,save){openModal(title,`<form id="edit-form">${fields.map(([key,label,type='text',options=''])=>`<label>${esc(label)}${type==='textarea'?`<textarea name="${key}" required>${esc(record[key]??'')}</textarea>`:type==='select'?`<select name="${key}">${options.split('|').map(v=>`<option value="${esc(v)}" ${String(record[key])===v?'selected':''}>${esc(v)}</option>`).join('')}</select>`:`<input name="${key}" type="${type}" value="${esc(record[key]??'')}" required>`}</label>`).join('')}<button>Save changes</button><p id="form-error" class="error"></p></form>`);wireSaveForm(save)}
+async function generic(c,path,fields,label,make){let items=await api(path);if(!Array.isArray(items))items=items.items||[];let spec=EDIT_SPECS[path],canEdit=spec&&(role==='platform_admin'||spec.roles.includes(role));c.innerHTML=`<div class="card">${label?`<button id="new">+ ${esc(label)}</button>`:''}${table(items,fields,canEdit?{label:'Edit'}:null)}</div>`;if(label)c.querySelector('#new').onclick=make;if(path==='/api/controls'){const info=document.createElement('p');info.textContent=items.length+' controls in this workspace. Imports saved as Requirements appear under Frameworks.';c.querySelector('.card').prepend(info);const button=document.createElement('button');button.textContent='Import controls from a document';button.onclick=()=>{cache.documentImportKind='controls';navigate('Document Extraction')};c.querySelector('.card').prepend(button)}if(canEdit)wireActions(c,items,{run:r=>{if(spec.allowed&&!spec.allowed(r)){alert('Only draft policies can be edited.');return}editForm('Edit '+(r.title||r.name||r.code),spec.fields,r,d=>api(spec.endpoint(r),spec.method,{...d,...(spec.version?{version:r.version}:{})}))}})}
+function controlForm(){form('New control',[['code','Control code'],['title','Title'],['description','Description','textarea'],['owner','Owner']],d=>api('/api/controls','POST',d))}
+async function compliancePage(c){
+ const editable=['platform_admin','tenant_admin','risk_manager','auditor'].includes(role),admin=['platform_admin','tenant_admin'].includes(role),canFinalize=['platform_admin','tenant_admin','auditor'].includes(role);
+ let frames=await api('/api/frameworks'),connections=[];if(!c.isConnected)return;
+ if(editable)try{connections=await api('/api/compliance/connectors')}catch(e){connections=[]}
+ async function download(path,name){const response=await fetch(path,{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw Error('Download failed: '+response.status+' '+await response.text());const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+ const selectOptions=rows=>rows.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.name||x.title||x.id)+'</option>').join('');
+ async function home(){
+  c.innerHTML='<section class="card"><h2>Compliance audits</h2><p>Create an evidence-based audit of every imported safeguard in selected frameworks. Applicability, implementation and effectiveness are separate decisions. Untested safeguards do not pass. Imported catalogue completeness must be checked against the full source standard.</p><p>Entra and Active Directory checks test stated configuration or sampled operating facts. They do not independently establish every standard obligation. Physical, organizational and other unsupported safeguards require documented tests and independent review.</p><button id="audit-collector">Download read-only AD collector</button><p id="audit-home-error" class="error" role="alert"></p><div id="audit-create-area"></div><div id="audit-connector-area"></div><h3>Saved audits</h3><div id="audit-list"></div></section>';
+  const error=c.querySelector('#audit-home-error');c.querySelector('#audit-collector').onclick=()=>download('/api/compliance/collectors/active-directory.ps1','Collect-LexiGridAD.ps1').catch(e=>error.textContent=e.message);
+  if(editable){c.querySelector('#audit-create-area').innerHTML='<details><summary>Create audit</summary><form id="audit-create"><label>Audit title<input name="title" minlength="3" maxlength="200" required></label><label>Scope, systems and observation period<textarea name="scope" minlength="10" maxlength="5000" required></textarea></label><label>Frameworks / standards — select every in-scope edition<select name="framework_ids" multiple required>'+frames.map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name+' — '+f.revision)+'</option>').join('')+'</select></label><label><input name="include_controls" type="checkbox" checked>Include unmapped workspace controls as separate, unattributed safeguards</label><button>Create full catalogue snapshot</button><p class="form-error error"></p></form></details>';
+   const form=c.querySelector('#audit-create');wire(form,async()=>{const ids=[...form.elements.framework_ids.selectedOptions].map(x=>x.value);if(!ids.length)throw Error('Choose an imported framework. Import the full requirements catalogue first.');const result=await api('/api/compliance/audits','POST',{title:form.elements.title.value,scope:form.elements.scope.value,framework_ids:ids,include_unmapped_controls:form.elements.include_controls.checked});await show(result.id)})}
+  if(admin){c.querySelector('#audit-connector-area').innerHTML='<details><summary>Configure read-only Microsoft Entra connector</summary><p>Use a dedicated app registration with Policy.Read.All and AuditLog.Read.All application permissions and administrator consent. Commercial Microsoft Graph is supported. Configure only a directory you are authorized to audit. LexiGrid uses read-only Graph GET resources; the app credential is encrypted with the existing evidence encryption provider.</p><form id="audit-entra-config"><label>Name<input name="name" minlength="3" required></label><label>Microsoft directory tenant ID<input name="directory_tenant_id" required></label><label>Application client ID<input name="client_id" required></label><label>Client secret<input name="client_secret" type="password" autocomplete="new-password" required></label><label>Sign-in observation days (1–30)<input name="lookback_days" type="number" min="1" max="30" value="7" required></label><button>Save encrypted connector</button><p class="form-error error"></p></form><div id="audit-connections"></div></details>';
+   const form=c.querySelector('#audit-entra-config');wire(form,async()=>{const body=Object.fromEntries(new FormData(form));body.lookback_days=Number(body.lookback_days);await api('/api/compliance/connectors/entra','POST',body);form.elements.client_secret.value='';connections=await api('/api/compliance/connectors');await home()});
+   const box=c.querySelector('#audit-connections');box.innerHTML=connections.map(x=>'<p>'+esc(x.name+' — '+x.state)+' '+(x.state==='active'?'<button data-disable-connector="'+esc(x.id)+'">Disable collection</button>':'')+'</p>').join('');for(const button of box.querySelectorAll('button'))button.onclick=async()=>{button.disabled=true;try{await api('/api/compliance/connectors/'+encodeURIComponent(button.dataset.disableConnector)+'/disable','POST',{});connections=await api('/api/compliance/connectors');await home()}catch(e){error.textContent=e.message;button.disabled=false}}
+  }
+  const audits=await api('/api/compliance/audits?limit=500');if(!c.isConnected)return;c.querySelector('#audit-list').innerHTML=audits.items.map(x=>'<p><button data-open-audit="'+esc(x.id)+'">'+esc(x.title+' — '+x.state+' — '+x.total_safeguards+' safeguards')+'</button></p>').join('')||'<p>No audits yet. Import the complete requirements and controls before creating an audit.</p>';for(const button of c.querySelectorAll('[data-open-audit]'))button.onclick=()=>show(button.dataset.openAudit).catch(e=>error.textContent=e.message);
+ }
+ function wire(form,save){let busy=false;form.onsubmit=async event=>{event.preventDefault();if(busy)return;busy=true;const button=form.querySelector('button'),error=form.querySelector('.form-error');button.disabled=true;error.textContent='';try{await save()}catch(e){if(form.isConnected)error.textContent=e.message}finally{busy=false;if(form.isConnected)button.disabled=false}}}
+ async function show(id){
+  const value=await api('/api/compliance/audits/'+encodeURIComponent(id));if(!c.isConnected)return;const open=value.state==='open',base='/api/compliance/audits/'+encodeURIComponent(id);
+  c.innerHTML='<section class="card"><button id="audit-back">All audits</button><h2>'+esc(value.title)+'</h2><p>State: '+esc(value.state)+' · Version: '+value.version+' · Snapshot integrity: '+esc(value.integrity_status)+'</p><p>'+esc(value.scope)+'</p><p>'+esc(value.notice)+'</p>'+(!['verified','not_finalized'].includes(value.integrity_status)?'<p class="error">Audit snapshot integrity failed. Do not rely on its conclusion; investigate the audit record and signed history.</p>':'')+(value.source_catalogue_changed?'<p class="error">Source catalogue changed. Create a new audit snapshot before finalization.</p>':'')+ '<p>Conclusion: '+esc(value.conclusion||'Incomplete — untested items do not pass.')+'</p>'+(value.finalized_by?'<p style="overflow-wrap:anywhere">Final reviewer: '+esc(value.finalized_by)+' · '+esc(value.finalized_at)+'<br>Review snapshot SHA-256: '+esc(value.review_snapshot_sha256)+'</p>':'')+'<div class="toolbar">'+['json','pdf','csv'].map(fmt=>'<button data-audit-export="'+fmt+'">Export '+fmt.toUpperCase()+'</button>').join('')+'</div><p id="audit-feedback" class="error" role="alert"></p><div class="cards">'+Object.entries(value.counts).map(([key,count])=>'<div class="card"><strong>'+esc(key.replaceAll('_',' '))+'</strong><p>'+count+'</p></div>').join('')+'</div><div id="audit-evidence-forms"></div><h3>Recorded evidence and technical observations</h3><div id="audit-evidence"></div><h3>Safeguard audit matrix</h3><label>Search reference or source text<input id="audit-item-search"></label><label>Review filter<select id="audit-item-filter"><option value="all">All safeguards</option><option value="unresolved">Untested / unresolved</option><option value="failed">Failed effectiveness</option></select></label><p id="audit-items-count" role="status"></p><div id="audit-items"></div><button id="audit-items-prev">Previous</button> <button id="audit-items-next">Next</button><div id="audit-finalize-area"></div></section>';
+  const feedback=c.querySelector('#audit-feedback');c.querySelector('#audit-back').onclick=home;for(const button of c.querySelectorAll('[data-audit-export]'))button.onclick=()=>download(base+'/export/'+button.dataset.auditExport,'lexigrid-compliance-audit.'+button.dataset.auditExport).catch(e=>feedback.textContent=e.message);
+  const evidenceBox=c.querySelector('#audit-evidence');evidenceBox.innerHTML=value.evidence.map(e=>'<details><summary>'+esc(e.title+' — '+e.source+' — '+e.collected_at)+'</summary><p>Source trust: '+esc(e.trust)+' · SHA-256: '+esc(e.sha256)+'</p><button data-download-evidence="'+esc(e.id)+'">Download protected source evidence</button>'+(e.checks||[]).map(check=>'<article class="card"><h4>'+esc(check.id+' — '+check.result)+'</h4><p>Dimension: '+esc(check.dimension)+'</p><p>Criteria: '+esc(check.criteria)+'</p><p>Observed: '+esc(JSON.stringify(check.observed))+'</p><p>'+esc(check.limitations.join(' '))+'</p></article>').join('')+'</details>').join('')||'<p>No evidence collected. Missing evidence is not a pass.</p>';for(const button of evidenceBox.querySelectorAll('button'))button.onclick=()=>download(base+'/evidence/'+encodeURIComponent(button.dataset.downloadEvidence)+'/download','audit-evidence.bin').catch(e=>feedback.textContent=e.message);
+  if(open&&editable){const forms=c.querySelector('#audit-evidence-forms');forms.innerHTML='<details><summary>Record evidence and read-only identity observations</summary><form id="audit-file"><label>Supporting evidence file (1 byte–10 MiB)<input name="file" type="file" required></label><button>Upload encrypted audit evidence</button><p class="form-error error"></p></form><hr><form id="audit-collect-entra"><label>Microsoft Entra connector<select name="connector_id" required>'+selectOptions(connections.filter(x=>x.state==='active'))+'</select></label><button>Collect read-only Entra observations</button><p class="form-error error"></p></form><hr><form id="audit-ad"><p>Run the read-only AD collector in the authorized Windows domain, then upload its JSON snapshot. Results remain operator-submitted until provenance is verified. Organization-selected password/lockout thresholds are not universal standard requirements.</p><label>Collector JSON<input name="file" type="file" accept=".json" required></label><label>Minimum password length<input name="minimum_password_length" type="number" min="1" max="128" value="14" required></label><label>Maximum lockout threshold<input name="maximum_lockout_threshold" type="number" min="1" max="100" value="10" required></label><button>Evaluate read-only AD snapshot</button><p class="form-error error"></p></form></details>';
+   const upload=forms.querySelector('#audit-file');wire(upload,async()=>{const body=new FormData();body.append('file',upload.elements.file.files[0]);const response=await fetch(base+'/evidence-files',{method:'POST',headers:{Authorization:'Bearer '+token},body});if(!response.ok)throw Error(await response.text());await show(id)});
+   const entra=forms.querySelector('#audit-collect-entra');wire(entra,async()=>{await api(base+'/collect-entra','POST',{connector_id:entra.elements.connector_id.value});await show(id)});
+   const ad=forms.querySelector('#audit-ad');wire(ad,async()=>{const file=ad.elements.file.files[0];if(file.size>20*1024*1024)throw Error('AD snapshot exceeds 20 MiB.');let snapshot;try{snapshot=JSON.parse(await file.text())}catch(e){throw Error('Choose valid JSON from the AD collector.')}await api(base+'/active-directory-snapshots','POST',{snapshot,minimum_password_length:Number(ad.elements.minimum_password_length.value),maximum_lockout_threshold:Number(ad.elements.maximum_lockout_threshold.value)});await show(id)});
+  }
+  let offset=0;function itemRows(){const query=c.querySelector('#audit-item-search').value.toLowerCase(),filter=c.querySelector('#audit-item-filter').value,rows=value.items.filter(item=>{const review=item.review;return (item.source.reference+' '+item.source.framework_name+' '+item.source.text).toLowerCase().includes(query)&&(filter==='all'||filter==='failed'&&review?.effectiveness==='failed'||filter==='unresolved'&&(!review||review.applicability==='undetermined'||['not_tested','insufficient_evidence'].includes(review.effectiveness)))});
+   c.querySelector('#audit-items-count').textContent=rows.length+' safeguards in this view; '+value.counts.total+' in the complete snapshot.';c.querySelector('#audit-items').innerHTML=rows.slice(offset,offset+100).map(item=>'<article class="card"><h4>'+esc(item.source.reference+' — '+item.source.framework_name)+'</h4><details><summary>Source safeguard and mapped controls</summary><p style="white-space:pre-wrap">'+esc(item.source.text)+'</p><p>'+esc(JSON.stringify(item.source.linked_controls))+'</p></details><p>Applicability: '+esc(item.review?.applicability||'undetermined')+' · Implementation: '+esc(item.review?.implementation||'unknown')+' · Effectiveness: '+esc(item.review?.effectiveness||'not_tested')+'</p>'+(item.review?'<p>Procedure: '+esc(item.review.procedure)+'</p><p>Observations: '+esc(item.review.observations)+'</p><p>Reviewer: '+esc(item.review.reviewed_by)+' · '+esc(item.review.reviewed_at)+'</p>':'')+(open&&editable?'<button data-review-safeguard="'+esc(item.id)+'">Record safeguard test / review</button>':'')+'</article>').join('');c.querySelector('#audit-items-prev').disabled=offset===0;c.querySelector('#audit-items-next').disabled=offset+100>=rows.length;for(const button of c.querySelectorAll('[data-review-safeguard]'))button.onclick=()=>review(value.items.find(x=>x.id===button.dataset.reviewSafeguard),value,()=>show(id))}
+  c.querySelector('#audit-item-search').oninput=()=>{offset=0;itemRows()};c.querySelector('#audit-item-filter').onchange=()=>{offset=0;itemRows()};c.querySelector('#audit-items-prev').onclick=()=>{offset=Math.max(0,offset-100);itemRows()};c.querySelector('#audit-items-next').onclick=()=>{offset+=100;itemRows()};itemRows();
+  if(open&&canFinalize){const area=c.querySelector('#audit-finalize-area');area.innerHTML='<details><summary>Independent final review</summary><p>A different reviewer from the audit creator must verify complete catalogue coverage and resolve every safeguard. Untested or unknown applicable safeguards block finalization. Finalization makes this audit read-only.</p><form id="audit-finalize"><label><input name="attested" type="checkbox" required>I compared this catalogue against every complete in-scope source standard.</label><label>Completeness review and source editions<textarea name="statement" minlength="30" required></textarea></label><label>Recorded evidence supporting catalogue completeness<select name="evidence" multiple required>'+selectOptions(value.evidence)+'</select></label><button>Finalize reviewed audit</button><p class="form-error error"></p></form></details>';
+   const form=area.querySelector('form');wire(form,async()=>{await api(base+'/finalize','POST',{version:value.version,catalogue_complete_attested:form.elements.attested.checked,completeness_statement:form.elements.statement.value,completeness_evidence_ids:[...form.elements.evidence.selectedOptions].map(x=>x.value)});await show(id)})}
+ }
+ function review(item,audit,refresh){
+  const old=item.review||{},options=(values,current)=>values.map(v=>'<option '+(v===current?'selected':'')+'>'+v+'</option>').join('');
+  openModal('Test / review safeguard: '+item.source.reference,'<p>'+esc(item.source.framework_name)+'</p><p style="white-space:pre-wrap">'+esc(item.source.text)+'</p><form id="audit-review-form"><label>Applicability<select name="applicability">'+options(['undetermined','applicable','not_applicable'],old.applicability)+'</select></label><label>Implementation<select name="implementation">'+options(['unknown','implemented','partial','not_implemented','not_applicable'],old.implementation)+'</select></label><label>Effectiveness<select name="effectiveness">'+options(['not_tested','insufficient_evidence','passed','failed','not_applicable'],old.effectiveness)+'</select></label><label>Test method<select name="method">'+options(['manual_evidence_review','technical_observation'],old.method)+'</select></label><label>Applicability and conclusion rationale<textarea name="reason" minlength="20" required>'+esc(old.reason||'')+'</textarea></label><label>Actual test procedure and scope<textarea name="procedure" minlength="10" required>'+esc(old.procedure||'')+'</textarea></label><label>Observed results<textarea name="observations" minlength="10" required>'+esc(old.observations||'')+'</textarea></label><fieldset><legend>Recorded supporting evidence and exact technical checks</legend>'+audit.evidence.map(e=>'<div><label><input type="checkbox" data-evidence-id="'+esc(e.id)+'">'+esc(e.title+' — '+e.trust)+'</label>'+(e.checks||[]).map(check=>'<label><input type="checkbox" data-check-evidence="'+esc(e.id)+'" data-check-id="'+esc(check.id)+'">'+esc(check.id+' / '+check.dimension+' / '+check.result)+'</label>').join('')+'</div>').join('')+'</fieldset><label><input name="verified" type="checkbox">I verified the origin, integrity, period and relevance of operator-submitted evidence.</label><label>Provenance verification details<textarea name="provenance_notes">'+esc(old.provenance_notes||'')+'</textarea></label><p>Configuration-only checks cannot prove effectiveness. A pass is limited to the stated test and reviewed scope; AI cannot supply a compliance pass.</p><button>Save test / review</button><p class="form-error error"></p></form>');
+  const form=document.getElementById('audit-review-form');for(const input of form.querySelectorAll('[data-evidence-id]'))input.checked=(old.evidence_ids||[]).includes(input.dataset.evidenceId);for(const input of form.querySelectorAll('[data-check-id]'))input.checked=(old.check_refs||[]).some(x=>x.evidence_id===input.dataset.checkEvidence&&x.check_id===input.dataset.checkId);form.elements.verified.checked=!!old.source_provenance_verified;
+  wire(form,async()=>{const body=Object.fromEntries(new FormData(form));body.version=item.version;body.source_provenance_verified=form.elements.verified.checked;delete body.verified;body.evidence_ids=[...form.querySelectorAll('[data-evidence-id]:checked')].map(x=>x.dataset.evidenceId);body.check_refs=[...form.querySelectorAll('[data-check-id]:checked')].map(x=>({evidence_id:x.dataset.checkEvidence,check_id:x.dataset.checkId}));await api('/api/compliance/audits/'+audit.id+'/items/'+item.id+'/review','PUT',body);if(modalContentIsCurrent(form)){closeModal();await refresh()}})
+ }
+ await home();
+}
+async function requirementsPage(c){
+ const editable=['platform_admin','tenant_admin','risk_manager'].includes(role);
+ c.innerHTML='<section class="card"><h2>Requirements</h2><p>View requirements across all frameworks, or choose a framework to add a requirement. Imported requirements remain associated with their source framework.</p><div class="toolbar"><button id="requirements-new-framework">Create a framework</button><button class="requirements-add">Add requirement</button></div><label for="requirements-framework">Framework</label><select id="requirements-framework"><option value="">All frameworks</option></select><label for="requirements-search">Search reference, requirement text or framework</label><input id="requirements-search" maxlength="200"><button id="requirements-find">Search</button><p id="requirements-count" role="status"></p><div class="requirements-list"></div><div class="toolbar"><button id="requirements-prev">Previous</button><button id="requirements-next">Next</button></div><p class="requirements-error error" role="alert"></p><details><summary>Requirements API</summary><p>GET /api/requirements supports q, framework_id, limit and offset. GET /api/requirements/{id} returns one requirement. POST /api/frameworks/{framework_id}/requirements adds a requirement. API calls require your existing authenticated session or bearer token.</p></details></section>';
+ const q=id=>c.querySelector('#'+id),select=q('requirements-framework'),list=c.querySelector('.requirements-list'),error=c.querySelector('.requirements-error'),add=c.querySelector('.requirements-add');
+ q('requirements-new-framework').hidden=add.hidden=!editable;q('requirements-new-framework').onclick=frameworkForm;
+ const frames=await api('/api/frameworks');if(!c.isConnected)return;
+ select.innerHTML+=[...frames].sort((a,b)=>a.name.localeCompare(b.name)).map(f=>`<option value="${esc(f.id)}">${esc(f.name)} — ${esc(f.revision)}</option>`).join('');
+ if(frames.some(f=>f.id===cache.requirementFramework))select.value=cache.requirementFramework;
+ let offset=0,request=0;
+ async function load(){const generation=++request,id=select.value;cache.requirementFramework=id;error.textContent='';add.disabled=!id;
+  const params=new URLSearchParams({limit:'100',offset:String(offset),q:q('requirements-search').value});if(id)params.set('framework_id',id);
+  const result=await api('/api/requirements?'+params);if(generation!==request||!c.isConnected)return;
+  q('requirements-count').textContent=frames.length?`${result.total} requirement${result.total===1?'':'s'} found. Showing ${result.items.length?offset+1:0}–${offset+result.items.length}. Choose a framework to enable Add requirement.`:'Create a framework first.';
+  list.innerHTML=result.items.length?result.items.map((row,index)=>'<article class="card"><h3>'+esc(row.reference)+'</h3><p>'+esc(row.framework_name+' — '+row.framework_revision)+'</p><p style="white-space:pre-wrap">'+esc(row.text.length>500?row.text.slice(0,300)+'…':row.text)+'</p>'+(row.text.length>500?'<details><summary>Read complete requirement</summary><p style="white-space:pre-wrap">'+esc(row.text)+'</p></details>':'')+(editable?'<button class="row-action" data-i="'+index+'">Edit requirement</button>':'')+'</article>').join(''):'<p>No requirements match this selection.</p>';
+  if(editable)wireActions(list,result.items,{run:row=>editForm('Edit requirement',[['reference','Reference'],['text','Requirement text','textarea']],row,d=>api('/api/frameworks/'+encodeURIComponent(row.framework_id)+'/requirements/'+encodeURIComponent(row.id),'PATCH',{...d,version:row.version}))});
+  q('requirements-prev').disabled=offset===0;q('requirements-next').disabled=offset+100>=result.total;
+ }
+ const safeLoad=()=>load().catch(e=>{if(c.isConnected)error.textContent=e.message});
+ select.onchange=()=>{offset=0;return safeLoad()};q('requirements-find').onclick=()=>{offset=0;return safeLoad()};q('requirements-search').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();offset=0;safeLoad()}};
+ q('requirements-prev').onclick=()=>{offset=Math.max(0,offset-100);return safeLoad()};q('requirements-next').onclick=()=>{offset+=100;return safeLoad()};
+ add.onclick=()=>{const id=select.value;if(!id)return;form('New requirement',[['reference','Reference'],['text','Requirement text','textarea']],d=>api('/api/frameworks/'+encodeURIComponent(id)+'/requirements','POST',d))};
+ await safeLoad();
+}
+async function frameworksPage(c,requirementsOnly=false){
+ if(requirementsOnly){c.innerHTML='<div class="card"><p>View and add requirements for the selected framework. Requirements retain their framework association.</p><button id="requirements-new-framework">Create a framework</button></div>';c.querySelector('#requirements-new-framework').hidden=!['platform_admin','tenant_admin','risk_manager'].includes(role);c.querySelector('#requirements-new-framework').onclick=frameworkForm}
+ else await generic(c,'/api/frameworks',['name','revision'],'New framework',frameworkForm);
+ const section=document.createElement('section');section.className='card';
+ section.innerHTML='<h2>Framework requirements</h2><label>Framework</label><select class="requirements-framework"></select><button class="requirements-add">Add requirement</button><div class="requirements-list"></div><p class="requirements-error error"></p>';
+ c.append(section);const select=section.querySelector('select'),list=section.querySelector('.requirements-list'),error=section.querySelector('.requirements-error');
+ const frameworks=await api('/api/frameworks');
+ select.innerHTML=frameworks.map(f=>`<option value="${esc(f.id)}">${esc(f.name)} - ${esc(f.revision)}</option>`).join('');
+ if(frameworks.some(f=>f.id===cache.requirementFramework))select.value=cache.requirementFramework;
+ const editable=['platform_admin','tenant_admin','risk_manager'].includes(role),add=section.querySelector('.requirements-add');add.hidden=!editable;
+ let request=0;
+ async function load(){const current=++request,id=select.value;cache.requirementFramework=id;
+  if(!id){list.textContent='Create a framework first.';add.disabled=true;return}add.disabled=false;
+  const rows=await api('/api/frameworks/'+encodeURIComponent(id)+'/requirements');if(current!==request||!section.isConnected)return;
+  list.innerHTML=table(rows,['reference','text'],editable?{label:'Edit'}:null);
+  if(editable)wireActions(list,rows,{run:r=>editForm('Edit requirement',[['reference','Reference'],['text','Requirement text','textarea']],r,
+   d=>api('/api/frameworks/'+encodeURIComponent(id)+'/requirements/'+encodeURIComponent(r.id),'PATCH',{...d,version:r.version}))});
+ }
+ select.onchange=()=>load().catch(e=>error.textContent=e.message);
+ add.onclick=()=>{const id=select.value;if(!id)return;form('New requirement',[['reference','Reference'],['text','Requirement text','textarea']],d=>api('/api/frameworks/'+encodeURIComponent(id)+'/requirements','POST',d))};
+ await load();
+}
+function frameworkForm(){form('New framework',[['name','Framework name'],['revision','Revision']],d=>api('/api/frameworks','POST',d))}
+function policyForm(){form('New policy',[['code','Policy code'],['title','Title'],['body','Policy text','textarea'],['owner','Owner']],d=>api('/api/policies','POST',d))}
+function vendorForm(){form('New vendor',[['name','Vendor name'],['service','Provided service'],['criticality','Criticality','select','low|medium|high|critical'],['owner','Business owner']],d=>api('/api/vendors','POST',d))}
+function serviceForm(){form('New business service',[['name','Service name'],['owner','Service owner'],['criticality','Criticality','select','low|medium|high|critical'],['recovery_time_hours','RTO (hours)','number'],['recovery_point_hours','RPO (hours)','number']],d=>api('/api/business-services','POST',{...d,recovery_time_hours:Number(d.recovery_time_hours),recovery_point_hours:Number(d.recovery_point_hours)}))}
+function lossForm(){form('New operational loss event',[['service_id','Business service ID'],['title','Event title'],['occurred_on','Date','date'],['loss_cents','Loss amount in cents','number'],['description','Description','textarea']],d=>api('/api/loss-events','POST',{...d,loss_cents:Number(d.loss_cents)}))}
+async function dashboard(c){let [d,r,controls,ap,rem]=await Promise.all([api('/api/dashboard/summary'),api('/api/risks'),api('/api/controls'),api('/api/approvals'),api('/api/remediations')]);c.innerHTML=`<div class="cards">${[['Total risks',d.total],['Critical risks',d.by_rating.critical],['Controls',controls.length],['Pending approvals',ap.filter(x=>x.state==='pending').length],['Open remediation',rem.filter(x=>x.state!=='closed').length]].map(([k,v])=>`<div class="card"><div class="muted">${k}</div><div class="metric">${v}</div></div>`).join('')}</div><div class="card"><h2>Risk heatmap</h2><div class="heat">${Array.from({length:25},(_,i)=>{let impact=5-Math.floor(i/5),likelihood=i%5+1,score=impact*likelihood,n=r.items.filter(x=>x.impact===impact&&x.likelihood===likelihood).length;return `<div class="cell ${score>16?'critical':score>9?'high':score<=4?'low':''}" title="Likelihood ${likelihood}, Impact ${impact}">${n}<div class="muted">${score}</div></div>`}).join('')}</div><p>Cells show risk count; small number is likelihood × impact.</p></div>`}
+// Automatic AI assessments are initiated only by authorized interactive risk actions.
+// A single risk/version is assessed at most once per browser session unless explicitly rerun.
+const aiAssessed=new Set();
+const aiPending=new Set();
+async function aiRiskPanel(r,auto=false){
+ const panel=document.getElementById('ai-risk-panel');if(!panel)return;
+ const allowed=['tenant_admin','risk_manager','risk_editor','platform_admin'].includes(role);
+ let status;try{status=await api('/api/ai/status')}catch(e){panel.innerHTML='<p class="error">AI status unavailable: '+esc(e.message)+'</p>';return}
+ if(!modalContentIsCurrent(panel))return;
+ if(!status.configured){panel.innerHTML='<p class="muted">AI unavailable: '+esc(status.reason||'Provider not configured')+'</p>';return}
+ const key=tenant+':'+r.id+':'+r.version;
+ panel.innerHTML='<p class="muted">AI provider: '+esc(status.provider)+' / '+esc(status.model)+'. Recommendations change the official rating only after you explicitly review and apply them.</p><button id="ai-run" '+(!allowed?'disabled':'')+'>Evaluate with AI</button><div id="ai-result" aria-live="polite"></div>';
+ const target=panel.querySelector('#ai-result');
+ const button=panel.querySelector('#ai-run');
+ let decisionBusy=false,savedProposal=null;
+ const display=x=>{
+  savedProposal=x;
+  const verified=x.provenance==='verified';
+  const v=verified?(x.assessment||{}):{},current=x.current_risk||r,proposed=x.state==='proposed';
+  const oldPanel=current.version!==r.version,canApply=allowed&&verified&&proposed&&x.can_apply&&!oldPanel;
+  const checks=v.score_checks||[],gaps=v.missing_information||[],limits=v.limitations||[];
+  const raw=v.model_assessment,rawScore=raw?raw.recommended_likelihood*raw.recommended_impact:null;
+  const facts=v.context_snapshot,controls=facts?.linked_controls;
+  target.innerHTML='<div class="card"><h3>'+(verified?'AI recommendation':'Saved proposal — unverified')+' ('+esc(x.state||'proposed')+')</h3><p><strong>Current official assessment:</strong> likelihood '+esc(current.likelihood)+' × impact '+esc(current.impact)+' = '+esc(current.score)+'</p><p><strong>'+(v.assessment_policy?'Reviewed proposal':'Historical model proposal — reassessment required')+':</strong> likelihood '+esc(v.recommended_likelihood??'—')+' × impact '+esc(v.recommended_impact??'—')+' = '+esc(v.proposed_score??'—')+'</p><p>Confidence: '+esc(v.confidence||'not recorded')+'</p>'+
+   (Array.isArray(controls)?'<p class="muted">Linked record snapshot: '+controls.length+' controls ('+controls.filter(x=>x.status==='implemented').length+' implemented, '+controls.filter(x=>x.status==='planned').length+' planned); '+(facts.control_tests||[]).length+' recorded control tests.</p>':'')+
+   (checks.length?'<div class="error"><strong>Evidence checks:</strong><ul>'+checks.map(value=>'<li>'+esc(value)+'</li>').join('')+'</ul></div>':'')+
+   (raw&&rawScore!==v.proposed_score?'<p class="muted">The unadjusted model estimate was '+esc(raw.recommended_likelihood)+' × '+esc(raw.recommended_impact)+' = '+esc(rawScore)+'. It was not used where supporting evidence was missing.</p>':'')+
+   (!verified?'<p class="error">This proposal has unverified provenance. Generate a new assessment before applying.</p>':'')+
+   (x.apply_block_reason&&proposed?'<p class="error">'+esc(x.apply_block_reason)+'</p>':'')+
+   (oldPanel?'<p class="error">The risk changed since this panel opened. Refresh the risk before applying.</p><button id="ai-refresh-risk">Refresh risk</button>':'')+
+   (allowed&&proposed?'<label for="ai-decision-note">Review note (optional)</label><textarea id="ai-decision-note" maxlength="2000" rows="2"></textarea><div class="toolbar"><button id="ai-keep">Keep current assessment</button><button id="ai-apply" '+(!canApply?'disabled':'')+'>Apply AI assessment</button></div><div id="ai-apply-confirm" hidden><p id="ai-apply-summary"></p><p>This updates likelihood and impact and saves a residual assessment with its rationale. Proposed treatments and actions remain recommendations.</p><button id="ai-apply-yes">Confirm and update risk</button> <button id="ai-apply-cancel">Cancel</button></div>':'')+
+   (checks.length&&raw?'<details><summary>Unadjusted model narrative (not adopted)</summary><p>'+esc(raw.rationale||'—')+'</p></details>':'')+
+   '<p><strong>Rationale:</strong> '+esc(v.rationale||'—')+'</p><p><strong>Proposed treatment:</strong> '+esc(v.treatment||'—')+'</p><p><strong>Proposed actions:</strong></p><ul>'+(v.actions||[]).map(a=>'<li>'+esc(a)+'</li>').join('')+'</ul>'+
+   (gaps.length?'<p><strong>Information gaps:</strong></p><ul>'+gaps.map(a=>'<li>'+esc(a)+'</li>').join('')+'</ul>':'')+
+   (limits.length?'<details><summary>Assessment limitations</summary><ul>'+limits.map(a=>'<li>'+esc(a)+'</li>').join('')+'</ul></details>':'')+
+   '<p class="muted">'+(v.methodology?'Methodology: '+esc(v.methodology.name)+' · ':'')+'Model: '+esc(v.model||status.model)+' · Record references: '+esc((v.evidence_refs||[]).join(', ')||'none supplied')+'. A stored control or attachment reference does not establish effectiveness.</p>'+
+   (x.decision?'<p class="success">'+(x.decision.action==='apply'?'This AI assessment was applied by an authorized user.':'Current official assessment was kept; this proposal was declined.')+'</p>':'')+
+   '<p id="ai-decision-status" role="status" aria-live="polite"></p></div>';
+  const refresh=target.querySelector('#ai-refresh-risk');if(refresh)refresh.onclick=async()=>{try{await manageRisk(await api('/api/risks/'+encodeURIComponent(r.id)),false)}catch(error){target.querySelector('#ai-decision-status').textContent=error.message}};
+  const keep=target.querySelector('#ai-keep'),apply=target.querySelector('#ai-apply');if(!keep)return;
+  const confirm=target.querySelector('#ai-apply-confirm'),yes=target.querySelector('#ai-apply-yes'),cancel=target.querySelector('#ai-apply-cancel'),feedback=target.querySelector('#ai-decision-status');
+  apply.onclick=()=>{if(decisionBusy||!canApply)return;confirm.hidden=false;target.querySelector('#ai-apply-summary').textContent='Update this risk from '+current.likelihood+' × '+current.impact+' = '+current.score+' to '+v.recommended_likelihood+' × '+v.recommended_impact+' = '+v.proposed_score+'?';yes.focus()};
+  cancel.onclick=()=>{if(!decisionBusy)confirm.hidden=true};
+  const decide=async action=>{
+   if(decisionBusy||!modalContentIsCurrent(target))return;
+   if(action==='apply'&&(!canApply||confirm.hidden))return;
+   decisionBusy=true;for(const b of [keep,apply,yes,cancel,button])b.disabled=true;
+   feedback.textContent=action==='apply'?'Applying reviewed assessment…':'Keeping current assessment…';
+   try{
+    const result=await api('/api/ai/risks/'+encodeURIComponent(r.id)+'/recommendations/'+encodeURIComponent(x.id)+'/decision','POST',
+     {action,risk_version:current.version,proposal_version:x.version,note:target.querySelector('#ai-decision-note').value});
+    if(!modalContentIsCurrent(target))return;
+    aiAssessed.add(tenant+':'+r.id+':'+result.risk.version);
+    if(action==='apply'){
+     await navigate(page);await manageRisk(result.risk,false);
+     const message=document.getElementById('ai-decision-status');if(message)message.textContent='AI assessment applied. Official score: '+result.risk.score+'. The risk register and reports use the updated rating.';
+    }else{display({...x,state:result.state,version:x.version+1,decision:result.decision,current_risk:result.risk,can_apply:false});target.querySelector('#ai-decision-status').textContent='Current assessment kept. Official risk rating unchanged.'}
+   }catch(error){if(modalContentIsCurrent(target))feedback.textContent='Decision failed: '+error.message+'. Refresh the risk before retrying if the result is uncertain.'}
+   finally{decisionBusy=false;if(modalContentIsCurrent(target)){keep.disabled=false;apply.disabled=!canApply;yes.disabled=cancel.disabled=false;button.disabled=!allowed}}
+  };
+  keep.onclick=()=>decide('keep_current');yes.onclick=()=>decide('apply');
+ };
+ try{let saved=await api('/api/ai/risks/'+encodeURIComponent(r.id)+'/recommendations');if(saved.length)display(saved[0])}catch(e){target.textContent='Unable to load prior recommendations: '+e.message}
+ const run=async(force=false)=>{
+  if(aiPending.has(key)||(!force&&aiAssessed.has(key)))return;
+  aiPending.add(key);
+  button.disabled=true;
+  target.innerHTML='<p>AI evaluation in progress…</p>';
+  try{
+   let v=await api('/api/ai/risks/'+encodeURIComponent(r.id)+'/assess','POST',{evidence_refs:[],evidence_notes:''});
+   aiAssessed.add(key);
+   if(modalContentIsCurrent(target))display(v);
+  }catch(e){
+   if(modalContentIsCurrent(target)){if(savedProposal){display(savedProposal);target.querySelector('#ai-decision-status').textContent='AI evaluation failed: '+e.message+'. The saved proposal remains available for review; official risk unchanged.'}else target.innerHTML='<p class="error">AI evaluation failed: '+esc(e.message)+'. Official risk unchanged.</p>';}
+  }finally{
+   aiPending.delete(key);
+   button.disabled=!allowed;
+  }
+ };
+ if(!modalContentIsCurrent(panel))return;
+ button.onclick=()=>run(true);
+ // Automatic evaluation occurs on first Manage opening for an active risk, not on page loads.
+ if(auto&&allowed&&r.status!=='closed')await run(false);
+}
+async function aiEvidenceWorkspace(r){
+ const base='/api/ai/risks/'+encodeURIComponent(r.id);
+ openModal('AI Evidence Workspace: '+r.title,'<div id="evidence-workspace">Loading linked evidence…</div>');
+ const box=document.getElementById('evidence-workspace');
+ let saving=false;
+ async function refresh(){
+ const [v,controls]=await Promise.all([api(base+'/evidence-workspace'),api('/api/controls')]);
+ if(!modalContentIsCurrent(box))return;
+ const c=v.context;
+ const rows=[['Linked controls',c.linked_controls],['Control tests',c.control_tests],['Findings',c.control_findings],['Evidence metadata',c.evidence_metadata],['Uploaded files',c.uploaded_files],['Prior assessments',c.prior_assessments],['Treatments',c.treatments],['User attestations',c.user_answers]];
+ box.innerHTML='<p class="muted">Tenant-scoped records used in AI evaluation. File contents are not read by the model; user answers are unverified.</p>'+rows.map(([name,items])=>'<details><summary>'+esc(name)+' ('+items.length+')</summary><div class="tablewrap"><table><tbody>'+items.map(x=>'<tr><td><pre style="white-space:pre-wrap">'+esc(JSON.stringify(x,null,2))+'</pre></td></tr>').join('')+'</tbody></table></div></details>').join('')+'<h3>Missing information</h3><ul>'+(v.missing_information.length?v.missing_information.map(x=>'<li>'+esc(x)+'</li>').join(''):'<li>No predefined gaps identified; verify evidence quality independently.</li>')+'</ul><hr><h3>Answer a question</h3><form id="evidence-answer"><label>Question<input name="question" minlength="5" maxlength="500" required placeholder="Is MFA enforced?"></label><label>Answer / source<textarea name="answer" maxlength="4000" required></textarea></label><button>Save answer</button></form><h3>Link an existing control</h3><form id="evidence-link"><label>Control<select name="control_id" id="evidence-control-list" required></select></label><button>Link control</button></form><h3>Attach evidence file to a linked control</h3><form id="evidence-upload"><label>Linked control<select id="evidence-upload-control" required></select></label><label>File (max 10 MiB)<input type="file" id="evidence-file" required></label><button>Upload encrypted file</button></form><p id="evidence-feedback" class="muted"></p>';
+ const options=controls.map(x=>'<option value="'+esc(x.id)+'">'+esc(x.code+' — '+x.title)+'</option>').join('');
+ box.querySelector('#evidence-control-list').innerHTML=options;
+ box.querySelector('#evidence-upload-control').innerHTML=c.linked_controls.map(x=>'<option value="'+esc(x.ref.slice(8))+'">'+esc(x.title)+'</option>').join('');
+ const feedback=box.querySelector('#evidence-feedback');
+ function wire(id, save){
+  const form=box.querySelector(id);
+  form.onsubmit=async event=>{
+   event.preventDefault();
+   if(saving)return;
+   saving=true;
+   for(const button of box.querySelectorAll('form button'))button.disabled=true;
+   feedback.textContent='';
+   try{
+    await save(form);
+    if(modalContentIsCurrent(form))await refresh();
+   }catch(error){
+    if(modalContentIsCurrent(form))feedback.textContent=error.message;
+   }finally{
+    saving=false;
+    for(const button of box.querySelectorAll('form button'))button.disabled=false;
+   }
+  };
+ }
+ wire('#evidence-answer',form=>api(base+'/evidence-answers','POST',Object.fromEntries(new FormData(form))));
+ wire('#evidence-link',form=>api(base+'/control-links','POST',{control_id:form.elements.control_id.value}));
+ wire('#evidence-upload',async form=>{
+  const cid=form.querySelector('#evidence-upload-control').value,file=form.querySelector('#evidence-file').files[0];
+  if(!cid||!file)throw Error('Select a linked control and a file');
+  const upload=new FormData();upload.append('file',file);
+  const response=await fetch('/api/controls/'+encodeURIComponent(cid)+'/evidence-files',
+   {method:'POST',headers:{Authorization:'Bearer '+token},body:upload});
+  if(!response.ok)throw Error('Upload failed: '+response.status+' '+await response.text());
+ });
+ }
+ try{await refresh()}catch(e){if(modalContentIsCurrent(box))box.innerHTML='<p class="error">'+esc(e.message)+'</p>'}
+
+}
+
+async function riskMailAutomation(r){
+ const [history,reminders,settings]=await Promise.all([api('/api/risks/'+r.id+'/mail'),api('/api/risks/'+r.id+'/reminders'),api('/api/notifications/settings')]);
+ const admin=['tenant_admin','risk_manager','platform_admin'].includes(role);
+ openModal('Risk email automation — '+r.title,`<p>Automatic updates are queued on risk edits and closure. Scheduled reminders go to opted-in stakeholders. Retrying a failed email requests one more attempt and is recorded in the audit history. If a delivery lease expired, the prior send may already have reached the SMTP server. SMTP acceptance is not delivery proof; read receipts require an explicit authenticated acknowledgment.</p>${admin?`<form id="reminder-form"><h3>Scheduled reminders</h3><label>Repeat every N days<input name="interval_days" type="number" min="1" max="365" value="${reminders[0]?.interval_days||7}" required></label><label><input name="enabled" type="checkbox" style="width:auto" ${reminders[0]?.enabled?'checked':''}> Enable reminders</label><button>Save reminder</button></form>`:''}${['tenant_admin','platform_admin'].includes(role)?`<form id="auto-form"><h3>Automatic risk-change email</h3><label><input name="auto_email" type="checkbox" style="width:auto" ${settings.auto_email?'checked':''}> Send when a risk is edited or closed</label><button>Save setting</button></form>`:''}<h3>Notification history</h3><div class="tablewrap"><table><thead><tr><th>Recipient</th><th>Event</th><th>SMTP status</th><th>Attempts</th><th>Last error</th><th>Sent</th><th>Delivered</th><th>Read</th><th>Action</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(m.email)}</td><td>${esc(m.kind)}</td><td>${esc(m.status)}</td><td>${esc(m.attempts)}</td><td>${esc(m.last_error||'—')}</td><td>${esc(m.sent_at||'—')}</td><td>${esc(m.delivered_at||'Not confirmed')}</td><td>${esc(m.read_at||'Not acknowledged')}</td><td>${admin&&m.status==='failed'?`<button class="mail-retry" data-id="${esc(m.id)}">Retry one delivery attempt</button>`:''}${m.email===window.lexigridUserEmail&&!m.read_at?`<button class="mail-read" data-id="${esc(m.id)}">Acknowledge read</button>`:''}</td></tr>`).join('')}</tbody></table></div><p id="mail-result" aria-live="polite"></p>`);
+ const result=()=>document.getElementById('mail-result');
+ document.querySelectorAll('.mail-retry').forEach(button=>button.onclick=()=>{
+  const mail=history.find(item=>item.id===button.dataset.id);
+  form('Retry failed email',[['reason','Reason for one additional delivery attempt','textarea']],async values=>{
+   await api('/api/risks/'+r.id+'/mail/'+mail.id+'/retry','POST',
+    {expected_attempts:mail.attempts,reason:values.reason});
+   await riskMailAutomation(r);
+  });
+ });
+ const rf=document.getElementById('reminder-form');if(rf)rf.onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));try{await api('/api/risks/'+r.id+'/reminders','POST',{interval_days:Number(d.interval_days),enabled:!!d.enabled});await riskMailAutomation(r)}catch(x){result().textContent=x.message}};
+ const af=document.getElementById('auto-form');if(af)af.onsubmit=async e=>{e.preventDefault();try{await api('/api/notifications/settings','PUT',{auto_email:!!new FormData(e.target).get('auto_email')});await riskMailAutomation(r)}catch(x){result().textContent=x.message}};
+ document.querySelectorAll('.mail-read').forEach(b=>b.onclick=async()=>{try{await api('/api/risks/'+r.id+'/mail/'+b.dataset.id+'/read','POST',{});await riskMailAutomation(r)}catch(x){result().textContent=x.message}});
+}
+async function riskStakeholders(r){
+ const rows=await api('/api/risks/'+r.id+'/contacts');
+ const writable=['tenant_admin','risk_manager','risk_editor','platform_admin'].includes(role),sendable=['tenant_admin','risk_manager','platform_admin'].includes(role);
+ openModal('Stakeholders & Email — '+r.title,`<p>Assign individual email addresses and roles. Only contacts with “Receive updates” enabled receive manual risk-update emails. Recipients do not automatically gain application access or approval authority.</p><div class="tablewrap"><table><thead><tr><th>Email</th><th>Role</th><th>Updates</th><th>Actions</th></tr></thead><tbody>${rows.map((x,i)=>`<tr><td>${esc(x.email)}</td><td>${esc(x.role)}</td><td>${x.notify?'Yes':'No'}</td><td>${writable?`<button class="stake-edit" data-i="${i}">Edit</button> <button class="stake-remove" data-i="${i}">Remove</button>`:''}</td></tr>`).join('')}</tbody></table></div>${writable?`<h3>Add stakeholder</h3><form id="stake-add"><label>Email address<input name="email" type="email" required maxlength="320"></label><label>Risk role<select name="role">${['owner','watcher','approver','auditor','reviewer'].map(x=>`<option>${x}</option>`).join('')}</select></label><label><input type="checkbox" name="notify" style="width:auto"> Receive email updates</label><button>Add stakeholder</button></form>`:''}${sendable?`<hr><h3>Send risk update</h3><p>Messages go only to opted-in contacts. SMTP must be configured by the administrator.</p><form id="stake-send"><label>Update message<textarea name="message" required maxlength="2000"></textarea></label><button>Send email update</button></form>`:''}<p id="stake-result" aria-live="polite"></p>`);
+ const msg=()=>document.getElementById('stake-result');
+ const formEl=document.getElementById('stake-add');if(formEl)formEl.onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));try{await api('/api/risks/'+r.id+'/contacts','POST',{email:d.email,role:d.role,notify:!!d.notify});await riskStakeholders(r)}catch(err){msg().textContent=err.message}};
+ document.querySelectorAll('.stake-remove').forEach(b=>b.onclick=async()=>{if(!confirm('Remove this stakeholder?'))return;try{await api('/api/risks/'+r.id+'/contacts/'+rows[+b.dataset.i].id,'DELETE');await riskStakeholders(r)}catch(err){msg().textContent=err.message}});
+ document.querySelectorAll('.stake-edit').forEach(b=>b.onclick=()=>{let x=rows[+b.dataset.i];openModal('Edit stakeholder',`<form id="stake-update"><label>Email<input name="email" type="email" value="${esc(x.email)}" required></label><label>Role<select name="role">${['owner','watcher','approver','auditor','reviewer'].map(v=>`<option ${x.role===v?'selected':''}>${v}</option>`).join('')}</select></label><label><input type="checkbox" name="notify" style="width:auto" ${x.notify?'checked':''}> Receive email updates</label><button>Save changes</button></form><p id="stake-result"></p>`);document.getElementById('stake-update').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));try{await api('/api/risks/'+r.id+'/contacts/'+x.id,'PUT',{email:d.email,role:d.role,notify:!!d.notify});await riskStakeholders(r)}catch(err){msg().textContent=err.message}}});
+ const send=document.getElementById('stake-send');if(send)send.onsubmit=async e=>{e.preventDefault();if(!confirm('Send this update to all opted-in contacts?'))return;let d=Object.fromEntries(new FormData(e.target));try{let v=await api('/api/risks/'+r.id+'/notify','POST',d);msg().textContent='SMTP accepted '+v.accepted_count+' recipient(s). This does not guarantee inbox delivery.'}catch(err){msg().textContent=err.message}};
+}
+
+async function risks(c){let v=await api('/api/risks?limit=500');c.innerHTML=`<div class="card"><div class="toolbar"><button id="new">+ New risk</button><button id="refresh">Refresh</button><button id="report-link">Risk reports</button></div>${table(v.items,['title','category','owner','likelihood','impact','score','status'],{label:'Manage',run:()=>{}})}<p class="muted">Showing ${v.items.length} of ${v.total} risks. Use Reports for all records.</p></div>`;
+ c.querySelector('#new').onclick=()=>form('New risk',[['title','Title'],['description','Description','textarea'],['category','Category'],['owner','Owner'],['likelihood','Likelihood (1–5)','number'],['impact','Impact (1–5)','number'],['status','Status','select','open|mitigating']],async d=>{let r=await api('/api/risks','POST',{...d,likelihood:Number(d.likelihood),impact:Number(d.impact)});return r});
+ c.querySelector('#refresh').onclick=()=>navigate('Risks');c.querySelector('#report-link').onclick=()=>navigate('Reports');
+ wireActions(c,v.items,{label:'Manage',run:r=>manageRisk(r)})
+}
+function acceptanceInstant(value){const d=new Date(value);return Number.isFinite(d.valueOf())?d.toLocaleString(undefined,{timeZone:'UTC',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})+' UTC':'Not recorded'}
+async function riskAcceptanceQueue(c){
+ c.innerHTML='<section class="card"><h2>Risk acceptance and re-review</h2><p>Review exact risk content, approve independently and set a mandatory expiry. Expiry creates a durable re-review event and returns the unchanged accepted risk to mitigating. Historical accepted records without current proof require review.</p><label>Show<select id="acceptance-filter"><option value="pending">Pending decisions</option><option value="approved">Approved records</option><option value="expired">Expired records</option><option value="all">All acceptance history</option><option value="review_required">Re-review required</option></select></label><button id="acceptance-queue-refresh">Refresh</button><p id="acceptance-queue-status" role="status"></p><div id="acceptance-queue-items"></div><button id="acceptance-queue-prev">Previous</button> <button id="acceptance-queue-next">Next</button></section>';
+ let offset=0,serial=0;const filter=c.querySelector('#acceptance-filter'),status=c.querySelector('#acceptance-queue-status'),target=c.querySelector('#acceptance-queue-items'),prev=c.querySelector('#acceptance-queue-prev'),next=c.querySelector('#acceptance-queue-next');
+ async function load(){const id=++serial;prev.disabled=next.disabled=true;status.textContent='Loading acceptance records…';const selected=filter.value;
+  try{const v=await api((selected==='review_required'?'/api/risk-acceptance-reviews?':'/api/risk-acceptances?'+(selected==='all'?'':'state='+selected+'&'))+'limit=50&offset='+offset);if(id!==serial||!c.isConnected)return;status.textContent=v.total?'Showing '+(offset+1)+'–'+(offset+v.items.length)+' of '+v.total:'No records in this view.';target.innerHTML=v.items.map(x=>'<article class="card"><strong>'+esc(x.data.risk_snapshot?.title||x.data.risk_title||x.risk_title||x.data.risk_id||x.title)+'</strong><p>'+esc(x.state)+' · '+esc(x.data.expires_at?acceptanceInstant(x.data.expires_at):'')+'</p><button data-open-acceptance="'+esc(x.data.risk_id||x.title)+'">View risk and acceptance</button></article>').join('');prev.disabled=offset===0;next.disabled=offset+v.items.length>=v.total;for(const b of target.querySelectorAll('[data-open-acceptance]'))b.onclick=async()=>{try{const latest=await api('/api/risks/'+encodeURIComponent(b.dataset.openAcceptance));if(c.isConnected)await riskAcceptance(latest)}catch(e){status.textContent=e.message}};
+  }catch(e){if(id===serial&&c.isConnected)status.textContent=e.message}
+ }
+ filter.onchange=()=>{offset=0;return load()};c.querySelector('#acceptance-queue-refresh').onclick=()=>{offset=0;return load()};prev.onclick=()=>{offset=Math.max(0,offset-50);return load()};next.onclick=()=>{offset+=50;return load()};await load();
+}
+async function riskAcceptance(r){
+ openModal('Risk acceptance: '+r.title,'<p id="acceptance-loading" role="status">Loading current risk and acceptance history…</p><div id="acceptance-body"></div>');
+ const anchor=document.getElementById('acceptance-body'),status=document.getElementById('acceptance-loading');let busy=false;
+ try{const [value,current]=await Promise.all([api('/api/risks/'+encodeURIComponent(r.id)+'/acceptances?limit=200'),api('/api/risks/'+encodeURIComponent(r.id))]);if(!modalContentIsCurrent(anchor))return;
+  status.textContent='Current risk: '+current.status+' · Score '+current.score+' · Version '+current.version;
+  const canRequest=['tenant_admin','risk_manager','risk_editor','platform_admin'].includes(role),canDecide=['tenant_admin','risk_manager','auditor','platform_admin'].includes(role);
+  anchor.innerHTML='<p>'+esc(value.notice)+'</p>'+(value.legacy_or_unverified?'<p class="error">Accepted status has no current verifiable approval. Review its history and request a new independent acceptance, or reopen the risk for mitigation.</p>':'')+'<p>'+ (value.valid_acceptance?'A current content-bound acceptance is in force.':'No current acceptance is in force.')+'</p>'+ (canRequest&&current.status!=='closed'?'<form id="acceptance-request"><h3>Request acceptance or renewal</h3><label>Business rationale<textarea name="reason" minlength="10" maxlength="5000" required></textarea></label><label>Expiry in your local time (saved as UTC)<input name="expires_at" type="datetime-local" required></label><button>Submit for independent review</button></form>':'')+'<p id="acceptance-feedback" role="alert"></p><h3>Acceptance history</h3>'+value.items.map(x=>'<article class="card"><h4>'+esc(x.state)+(x.effective?' — current':'')+'</h4><p>Provenance: '+esc(x.provenance)+'</p><p>Requester: '+esc(x.requester||x.data.requester_id)+' · Expiry: '+esc(acceptanceInstant(x.data.expires_at))+'</p><p>'+esc(x.data.reason)+'</p><details><summary>Exact risk snapshot reviewed</summary><dl>'+Object.entries(x.data.risk_snapshot||{}).map(([key,value])=>'<dt>'+esc(key.charAt(0).toUpperCase()+key.slice(1).replaceAll('_',' '))+'</dt><dd style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(value)+'</dd>').join('')+'</dl></details>'+(x.data.decision_note?'<p>Decision: '+esc(x.data.decision_note)+' · '+esc(x.decided_by||x.data.decided_by)+'</p>':'')+(canDecide&&x.provenance!=='invalid_or_unavailable'&&x.state==='pending'?'<button data-acceptance-id="'+esc(x.id)+'" data-decision="approved" '+(!value.can_approve||x.data.requester_id===window.lexigridUserId?'disabled':'')+'>Approve exact risk until expiry</button> <button data-acceptance-id="'+esc(x.id)+'" data-decision="rejected">Reject request</button>':'')+(canDecide&&x.provenance!=='invalid_or_unavailable'&&x.state==='approved'?'<button data-acceptance-id="'+esc(x.id)+'" data-decision="revoked">Revoke acceptance</button>':'')+'</article>').join('')+(value.total>value.items.length?'<p>Showing the newest '+value.items.length+' of '+value.total+' records. Use the Risk Acceptance workspace and its pagination for complete history.</p>':'')+'<button id="acceptance-back">Back to risks</button>';
+  const feedback=anchor.querySelector('#acceptance-feedback');async function submit(path,body){if(busy)return;busy=true;for(const b of anchor.querySelectorAll('button'))b.disabled=true;feedback.textContent='Saving reviewed acceptance…';
+   try{await api(path,'POST',body);if(!modalContentIsCurrent(anchor))return;const latest=await api('/api/risks/'+encodeURIComponent(r.id));if(modalContentIsCurrent(anchor))await riskAcceptance(latest)}catch(e){if(modalContentIsCurrent(anchor)){feedback.textContent=e.message;busy=false;for(const b of anchor.querySelectorAll('button'))b.disabled=false;for(const b of anchor.querySelectorAll('[data-decision="approved"]'))b.disabled=!value.can_approve||value.items.find(x=>x.id===b.dataset.acceptanceId)?.data.requester_id===window.lexigridUserId}}
+  }
+  const form=anchor.querySelector('#acceptance-request');if(form)form.onsubmit=event=>{event.preventDefault();if(busy)return;const fields=new FormData(form),expiry=new Date(fields.get('expires_at'));if(!Number.isFinite(expiry.valueOf())){feedback.textContent='Choose a valid expiry.';return}return submit('/api/risks/'+encodeURIComponent(r.id)+'/acceptances',{risk_version:current.version,reason:String(fields.get('reason')),expires_at:expiry.toISOString()})};
+  for(const b of anchor.querySelectorAll('[data-acceptance-id]'))b.onclick=()=>{if(busy)return;const item=value.items.find(x=>x.id===b.dataset.acceptanceId);const decision=b.dataset.decision;openModal('Review acceptance decision','<p>'+esc(decision)+' — '+esc(current.title)+' · Risk version '+item.data.risk_snapshot.version+' · Score '+item.data.risk_snapshot.likelihood*item.data.risk_snapshot.impact+' · Expiry '+esc(acceptanceInstant(item.data.expires_at))+'</p><p>'+esc(item.data.reason)+'</p><form id="acceptance-decision"><label>Independent review rationale<textarea name="note" minlength="10" maxlength="5000" required></textarea></label><p id="acceptance-decision-status" role="alert"></p><button id="acceptance-confirm">Confirm '+esc(decision)+'</button></form>');const f=document.getElementById('acceptance-decision');let saving=false;f.onsubmit=async event=>{event.preventDefault();if(saving)return;saving=true;document.getElementById('acceptance-confirm').disabled=true;const message=document.getElementById('acceptance-decision-status');try{const response=await api('/api/risks/'+encodeURIComponent(r.id)+'/acceptances/'+encodeURIComponent(item.id)+'/decision','POST',{version:item.version,decision,note:String(new FormData(f).get('note'))});if(modalContentIsCurrent(f))await riskAcceptance(response.risk)}catch(e){if(modalContentIsCurrent(f)){message.textContent=e.message;saving=false;document.getElementById('acceptance-confirm').disabled=false}}};};
+  anchor.querySelector('#acceptance-back').onclick=async()=>{closeModal();await navigate('Risks')};
+ }catch(e){if(modalContentIsCurrent(anchor))status.textContent='Acceptance could not be loaded: '+e.message}
+}
+async function riskHistory(r){
+ openModal('Change history: '+r.title,'<button id="history-back">Back to risk</button> <button id="history-refresh">Refresh history</button><p id="history-status" role="status" aria-live="polite"></p><p id="history-notice"></p><div id="history-items"></div><button id="history-prev">Previous</button> <button id="history-next">Next</button>');
+ const panel=document.getElementById('history-items'),status=document.getElementById('history-status'),prev=document.getElementById('history-prev'),next=document.getElementById('history-next'),refresh=document.getElementById('history-refresh');let offset=0,busy=false;
+ document.getElementById('history-back').onclick=async()=>{try{const latest=await api('/api/risks/'+encodeURIComponent(r.id));if(modalContentIsCurrent(panel))await manageRisk(latest,false)}catch(e){if(modalContentIsCurrent(panel))status.textContent=e.message}};
+ async function load(target=offset){if(busy)return;busy=true;prev.disabled=next.disabled=refresh.disabled=true;status.textContent='Loading recorded changes…';
+  try{const v=await api('/api/risks/'+encodeURIComponent(r.id)+'/history?limit=50&offset='+target);if(!modalContentIsCurrent(panel))return;offset=target;
+   document.getElementById('history-notice').textContent=v.notice;status.textContent=v.total?'Showing '+(offset+1)+'–'+(offset+v.items.length)+' of '+v.total+' events · Current risk version '+v.current_version:'No recorded revisions are available.';
+   panel.innerHTML=v.items.map(item=>'<article class="card"><h3>'+esc(item.action.replace('risk.','').replaceAll('_',' '))+'</h3><p>'+esc(item.at)+' · '+esc(item.actor)+'</p><p class="'+(item.integrity==='invalid'?'error':'muted')+'">Audit signature: '+esc(item.integrity)+'</p>'+(item.integrity==='invalid'?'<p class="error">Integrity check failed. Changed content is withheld; contact your administrator.</p>':(item.resolution?'<p>Resolution: '+esc(item.resolution)+'</p>':'')+(item.source?'<p>Source: '+esc(item.source)+'</p>':'')+'<details><summary>Recorded before and after values</summary>'+['before','after'].map(side=>'<h4>'+side.charAt(0).toUpperCase()+side.slice(1)+'</h4>'+(item[side]?'<dl>'+Object.entries(item[side]).map(([key,value])=>'<dt>'+esc(key.replaceAll('_',' '))+'</dt><dd style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(value)+'</dd>').join('')+'</dl>':'<p>Not recorded for this event.</p>')).join('')+'</details>')+'</article>').join('');prev.disabled=offset===0;next.disabled=offset+v.items.length>=v.total;
+  }catch(e){if(modalContentIsCurrent(panel)){status.textContent='History could not be loaded: '+e.message;prev.disabled=next.disabled=true}}
+  finally{busy=false;if(modalContentIsCurrent(panel))refresh.disabled=false}
+ }
+ prev.onclick=()=>load(Math.max(0,offset-50));next.onclick=()=>load(offset+50);refresh.onclick=()=>load(0);await load();
+}
+async function governanceRiskPanel(r,auto=true){
+ const panel=document.getElementById('risk-governance-panel');if(!panel)return;
+ const allowed=['tenant_admin','risk_manager','risk_editor','platform_admin'].includes(role),base='/api/ai/risks/'+encodeURIComponent(r.id)+'/governance-matches';
+ panel.innerHTML='<p>AI matches identify applicable records. They do not change the risk score or prove that controls are effective.</p><button id="governance-rescan" '+(!allowed?'hidden':'')+'>Rescan applicable records</button><p id="governance-status" role="status" aria-live="polite"></p><div id="governance-results"></div>';
+ const status=panel.querySelector('#governance-status'),results=panel.querySelector('#governance-results'),button=panel.querySelector('#governance-rescan');let busy=false;
+ function display(value){
+  if(value.status!=='complete'){status.textContent=value.status==='stale'?'Governance records or this risk changed; a new scan is required.':'No saved governance scan. An authorized risk editor can open this risk to run matching.';results.replaceChildren();return}
+  status.textContent=(value.cached?'Saved current matches':'Scan completed')+' · '+value.provider+' / '+value.model+' · '+value.created_at;
+  results.innerHTML='<p>Records scanned: '+esc(Object.entries(value.scanned_counts).map(([kind,count])=>kind+' '+count).join(' · '))+'. AI reviewed: '+esc(Object.entries(value.reviewed_counts).map(([kind,count])=>kind+' '+count).join(' · '))+'.</p>'+(value.matches.length?['policies','controls','frameworks','requirements'].map(kind=>{const rows=value.matches.filter(x=>x.kind===kind);return '<h4>'+esc(kind.charAt(0).toUpperCase()+kind.slice(1))+' ('+rows.length+')</h4>'+rows.map(x=>'<article class="card"><strong>'+esc(x.code+' — '+x.title)+'</strong><p>Lifecycle: '+esc(x.status)+' · '+(x.basis==='contains_matched_requirement'?'Association: contains matched requirement':'AI confidence: '+esc(x.confidence))+'</p><p>'+esc(x.reason)+'</p><blockquote>'+esc(x.quote)+'</blockquote><button data-governance-ref="'+esc(x.ref)+'">View matched record</button></article>').join('')}).join(''):'<p>No applicable matches were identified in the reviewed candidates.</p>')+'<details><summary>Scan coverage and limitations</summary><ul>'+value.limitations.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></details>';
+  for(const open of results.querySelectorAll('[data-governance-ref]'))open.onclick=async()=>{const item=value.matches.find(x=>x.ref===open.dataset.governanceRef);open.disabled=true;
+   try{let record;if(item.kind==='requirements')record=await api('/api/requirements/'+encodeURIComponent(item.id));else record=(await api('/api/'+item.kind)).find(x=>x.id===item.id);if(!modalContentIsCurrent(panel))return;if(!record)throw Error('Matched record no longer exists; rescan the risk.');
+    const fields=item.kind==='requirements'?[['Framework',record.framework_name+' — '+record.framework_revision],['Reference',record.reference],['Requirement',record.text]]:item.kind==='frameworks'?[['Framework',record.name],['Revision',record.revision]]:[['Code',record.code],['Title',record.title],['Owner',record.owner],['Status',record.status],['Text',record.description||record.body]];
+    openModal('Matched '+item.kind,fields.map(([label,text])=>'<h3>'+esc(label)+'</h3><p style="white-space:pre-wrap">'+esc(text)+'</p>').join('')+'<button id="governance-back-risk">Back to risk</button>');document.getElementById('governance-back-risk').onclick=()=>manageRisk(r,false);
+   }catch(e){if(modalContentIsCurrent(panel))status.textContent=e.message}finally{if(open.isConnected)open.disabled=false}
+  };
+ }
+ async function run(force=false){if(busy)return;busy=true;button.disabled=true;status.textContent='Scanning policies, controls, frameworks and requirements…';
+  try{const value=await api(base+(force?'?force=true':''),(auto||force)&&allowed?'POST':'GET');if(modalContentIsCurrent(panel))display(value)}
+  catch(e){if(modalContentIsCurrent(panel))status.textContent='Governance matching failed: '+e.message+' Use Rescan to retry; no risk rating was changed.'}
+  finally{busy=false;if(modalContentIsCurrent(panel))button.disabled=false}
+ }
+ button.onclick=()=>run(true);await run();
+}
+async function manageRisk(r,auto=true){openModal('Manage risk: '+r.title,`<p>Status: ${esc(r.status)} · Score: ${r.score}</p><p>${esc(r.description)}</p><div class="toolbar">${['tenant_admin','risk_manager','risk_editor','platform_admin'].includes(role)?'<button id="edit-risk">Edit risk</button>':''}<button id="assess-risk">Manual assessment</button><button id="evidence-workspace-open">AI Evidence Workspace</button><button id="risk-history">Change history</button><button id="risk-acceptance">Acceptance & expiry</button><button id="risk-stakeholders">Stakeholders & Email</button><button id="risk-mail-automation">Email automation & receipts</button>${r.status!=='closed'&&['tenant_admin','risk_manager','platform_admin'].includes(role)?'<button id="close-risk">Resolve & Close</button>':''}</div><hr><h3>Applicable policies, controls, frameworks and requirements</h3><div id="risk-governance-panel"></div><hr><h3>AI Risk Assessment</h3><div id="ai-risk-panel"><p>Checking AI configuration…</p></div>`);
+ document.getElementById('risk-history').onclick=()=>riskHistory(r);document.getElementById('risk-acceptance').onclick=()=>riskAcceptance(r);
+ const governanceAnchor=document.getElementById('risk-governance-panel');let editRisk=document.getElementById('edit-risk');if(editRisk)editRisk.onclick=()=>editForm('Edit risk: '+r.title,[['title','Title'],['description','Description','textarea'],['category','Category'],['owner','Owner'],['likelihood','Likelihood (1–5)','number'],['impact','Impact (1–5)','number'],['status','Status','select',r.status==='accepted'?'accepted|open|mitigating|closed':'open|mitigating|closed']],r,d=>api('/api/risks/'+r.id,'PUT',{...d,likelihood:Number(d.likelihood),impact:Number(d.impact),version:r.version}));document.getElementById('evidence-workspace-open').onclick=()=>aiEvidenceWorkspace(r);document.getElementById('risk-stakeholders').onclick=()=>riskStakeholders(r);document.getElementById('risk-mail-automation').onclick=()=>riskMailAutomation(r);document.getElementById('assess-risk').onclick=()=>form('Assess risk: '+r.title,[['kind','Assessment type','select','inherent|residual|target'],['likelihood','Likelihood','number'],['impact','Impact','number'],['rationale','Rationale','textarea']],d=>api(`/api/risks/${r.id}/assessments`,'POST',{...d,likelihood:Number(d.likelihood),impact:Number(d.impact)}));let b=document.getElementById('close-risk');if(b)b.onclick=()=>form('Resolve & Close: '+r.title,[['resolution','Resolution justification (minimum 10 characters)','textarea']],d=>api(`/api/risks/${r.id}/close`,'POST',{version:r.version,resolution:d.resolution}));await governanceRiskPanel(r,auto);if(!modalContentIsCurrent(governanceAnchor))return;await (auto?aiRiskPanel(r,true):aiRiskPanel(r,false)).catch(e=>{let p=document.getElementById('ai-risk-panel');if(p)p.textContent=e.message})
+}
+async function reportsPage(c){c.innerHTML=`<div class="card"><h2>Risk portfolio report</h2><p>All risk records in your selected tenant, including closed risks. Filter or export the complete report.</p><div class="toolbar"><select id="report-status"><option value="">All statuses</option>${['open','mitigating','accepted','closed'].map(x=>`<option>${x}</option>`).join('')}</select><input id="report-category" placeholder="Category (optional)"><input id="report-owner" placeholder="Owner (optional)"><button id="report-run">Run report</button><button id="report-export">Export CSV</button></div><div id="report-results"></div></div>`;const query=()=>{let q=new URLSearchParams();for(let [id,k] of [['report-status','status'],['report-category','category'],['report-owner','owner']]){let v=c.querySelector('#'+id).value.trim();if(v)q.set(k,v)}return q.toString()};let request=0;async function run(){const latest=++request;let r=await api('/api/reports/risks?'+query());if(latest!==request)return;c.querySelector('#report-results').innerHTML=`<div class="cards"><div class="card"><div class="muted">Total risks</div><div class="metric">${r.total}</div></div>${Object.entries(r.by_status).map(([k,v])=>`<div class="card"><div class="muted">${esc(k)}</div><div class="metric">${v}</div></div>`).join('')}</div><h3>Risk ratings</h3><p>${Object.entries(r.by_rating).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ')}</p>${table(r.items,['title','category','owner','likelihood','impact','score','status','created_by','updated_by','approved_by','approval_status','closed_by','updated_at'])}`};c.querySelector('#report-run').onclick=()=>run().catch(e=>alert(e.message));c.querySelector('#report-export').onclick=async()=>{let r=await fetch('/api/reports/risks.csv?'+query(),{headers:{Authorization:'Bearer '+token}});if(!r.ok)throw Error('Export failed');let url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download='lexigrid-risk-report.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+ for(const kind of ['xlsx','pdf']){const b=document.createElement('button');b.textContent='Export '+kind.toUpperCase();c.querySelector('#report-export').after(b);b.onclick=async()=>{try{const response=await fetch('/api/reports/risks.'+kind+'?'+query(),{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw Error('Export failed: '+response.status);const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download='lexigrid-risk-report.'+kind;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){alert(e.message)}}}
+ if(role==='platform_admin'){
+  const section=document.createElement('section');section.className='card';section.innerHTML='<h2>Platform risk report</h2><p>Explicitly select organizations to include. Each export records the selection in your organization audit history.</p><select class="platform-report-tenants" multiple aria-label="Organizations"></select><select class="platform-report-format" aria-label="Export format"><option>json</option><option>csv</option><option>xlsx</option><option>pdf</option></select><button class="platform-report-export">Export selected organizations</button><p class="platform-report-error error"></p>';c.append(section);
+  const tenants=await api('/api/platform/tenants'),select=section.querySelector('.platform-report-tenants');select.innerHTML=tenants.map(t=>`<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+  section.querySelector('button').onclick=async()=>{const error=section.querySelector('.platform-report-error');error.textContent='';const button=section.querySelector('button');if(button.disabled)return;button.disabled=true;try{const params=new URLSearchParams();for(const option of select.selectedOptions)params.append('tenant_ids',option.value);if(!select.selectedOptions.length)throw Error('Select at least one organization');const kind=section.querySelector('.platform-report-format').value;params.set('format',kind);const response=await fetch('/api/platform/reports/risks?'+params,{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw Error('Export failed: '+response.status);const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download='lexigrid-platform-risk-report.'+kind;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){error.textContent=e.message}finally{button.disabled=false}};
+ }
+;await run()}
+
+async function approvals(c){let items=await api('/api/approvals');c.innerHTML=`<div class="card"><button id="new">+ Request approval</button><p>Risk acceptance requires the Risk Acceptance workspace and an expiry. These approvals bind the exact reviewed content; stale or legacy unbound decisions cannot authorize a new action.</p>${table(items,['object_type','object_id','reason','state','binding_status','requester_id'],{label:'Decide',run:()=>{}})}</div>`;c.querySelector('#new').onclick=()=>form('Request approval',[['object_type','Object type','select','risk|policy|finding'],['object_id','Object ID'],['reason','Reason','textarea']],d=>api('/api/approvals','POST',d));wireActions(c,items,{label:'Decide',run:x=>form('Approval decision',[['decision','Decision','select','approved|rejected'],['note','Decision rationale','textarea']],d=>api(`/api/approvals/${x.id}/decision`,'POST',{...d,version:x.version}))})}
+async function remediationTransition(x){
+ openModal('Update remediation','<form id="remediation-transition"><label>New state<select id="remediation-state">'+['in_progress','blocked','ready_for_review','closed','reopened'].map(v=>'<option>'+v+'</option>').join('')+'</select></label><label>Reason and review attestation<textarea id="remediation-note" minlength="5" maxlength="5000" required></textarea></label><div id="remediation-proof" hidden></div><p id="remediation-feedback" role="alert"></p><button id="remediation-save">Save transition</button></form>');
+ const form=document.getElementById('remediation-transition'),state=document.getElementById('remediation-state'),proof=document.getElementById('remediation-proof'),feedback=document.getElementById('remediation-feedback'),save=document.getElementById('remediation-save');let context=null,busy=false,loading=false;
+ async function loadProof(){if(loading)return;loading=true;save.disabled=true;proof.textContent='Loading independent retests and evidence…';
+  try{const value=await api('/api/remediations/'+encodeURIComponent(x.id)+'/closure-context');if(!modalContentIsCurrent(form))return;context=value;
+   proof.innerHTML='<p>'+esc(value.notice)+'</p>'+(!value.can_review?'<p class="error">An independent authorized reviewer must close this remediation.</p>':'')+'<label>Passing independent retest<select id="remediation-retest"><option value="">Choose a retest</option>'+value.tests.filter(t=>t.eligible).map(t=>'<option value="'+esc(t.id)+'">'+esc(t.tested_at+' — '+t.procedure)+'</option>').join('')+'</select></label><fieldset><legend>Supporting evidence files</legend>'+value.evidence_files.filter(f=>f.eligible).map(f=>'<label><input type="checkbox" name="closure-evidence" value="'+esc(f.id)+'"> '+esc(f.filename)+' · '+esc(f.sha256)+'</label>').join('')+'</fieldset><p>Record the retest and upload its supporting files in the finding’s control after submitting the remediation for review. Reopen this dialog to refresh the choices. Your review note must explain how the selected files support the passing result.</p>';
+  }catch(e){if(modalContentIsCurrent(form)){context=null;feedback.textContent=e.message;proof.textContent='Closure evidence could not be loaded. Choose another state and retry.'}}
+  finally{loading=false;if(modalContentIsCurrent(form))save.disabled=busy||(state.value==='closed'&&!context?.can_review)}
+ }
+ state.onchange=async()=>{proof.hidden=state.value!=='closed';feedback.textContent='';if(state.value==='closed')await loadProof();else save.disabled=busy};
+ form.onsubmit=async event=>{event.preventDefault();if(busy||loading)return;const body={state:state.value,note:document.getElementById('remediation-note').value,version:x.version};
+  if(body.state==='closed'){if(!context?.can_review){feedback.textContent='Independent reviewer required.';return}body.retest_id=document.getElementById('remediation-retest').value;body.evidence_ids=Array.from(proof.querySelectorAll('input[name="closure-evidence"]:checked')).map(v=>v.value);if(!body.retest_id||!body.evidence_ids.length||body.evidence_ids.length>5){feedback.textContent='Choose one passing retest and 1–5 supporting files.';return}}
+  busy=true;save.disabled=true;state.disabled=true;feedback.textContent='Saving transition…';
+  try{await api('/api/remediations/'+encodeURIComponent(x.id)+'/transition','POST',body);if(!modalContentIsCurrent(form))return;closeModal();await navigate('Remediations')}
+  catch(e){if(modalContentIsCurrent(form))feedback.textContent=e.message}
+  finally{busy=false;if(modalContentIsCurrent(form)){state.disabled=false;save.disabled=state.value==='closed'&&!context?.can_review}}
+ };}
+async function remediations(c){let items=await api('/api/remediations');c.innerHTML=`<div class="card"><button id="new">+ Remediation</button>${table(items,['finding_id','description','owner','due_date','state'],{label:'Transition',run:()=>{}})}</div>`;c.querySelector('#new').onclick=()=>form('New remediation',[['finding_id','Finding ID'],['description','Description','textarea'],['owner','Owner'],['due_date','Due date','date']],d=>api('/api/remediations','POST',d));wireActions(c,items,{label:'Transition',run:x=>remediationTransition(x)})}
+async function openMfaEnrollment(credential,sessionIsCurrent,pageIsCurrent=sessionIsCurrent){
+ const v=await api('/api/auth/mfa/enroll','POST',{},credential);
+ if(!pageIsCurrent())return;
+ openModal('Add an authenticator',`<p>Scan this QR code with your authenticator app. Enter the current six-digit code generated by the app below.</p><img id="mfa-qr" alt="Authenticator setup QR code" width="264" height="264" style="display:block;max-width:100%;height:auto;background:white;margin:12px auto"><details><summary>Cannot scan? Enter the setup key manually</summary><p>This setup key is not the six-digit confirmation code. Keep it private.</p><code id="mfa-secret" style="overflow-wrap:anywhere"></code><p>Account: <span id="mfa-account"></span></p><p>Type: time-based (TOTP), SHA-1, 6 digits, 30 seconds.</p></details><p id="mfa-clock" class="muted"></p><label>Six-digit code from the authenticator app<input id="mfa-code" data-totp inputmode="numeric" autocomplete="one-time-code" maxlength="32"></label><button id="mfa-confirm">Enable MFA</button> <button id="mfa-cancel">Cancel setup</button><p id="mfa-error" role="alert" class="error"></p>`);
+ const image=document.getElementById('mfa-qr');image.src=v.qr_code_data_url;
+ document.getElementById('mfa-secret').textContent=v.secret;
+ document.getElementById('mfa-account').textContent=v.account;
+ const clock=document.getElementById('mfa-clock');clock.textContent=Math.abs(Date.now()/1000-v.server_time)>45?'Your device and server clocks differ. Check automatic date/time before entering a code.':'Codes change every 30 seconds. Use the code from this exact account entry.';
+ const confirmButton=document.getElementById('mfa-confirm'),cancel=document.getElementById('mfa-cancel'),code=document.getElementById('mfa-code'),error=document.getElementById('mfa-error');
+ confirmButton.onclick=async()=>{
+  if(confirmButton.disabled)return;
+  confirmButton.disabled=cancel.disabled=true;error.textContent='';
+  try{
+   const result=await api('/api/auth/mfa/confirm','POST',{code:code.value},credential);
+   if(!sessionIsCurrent())return;
+   token=result.access_token;tenant=result.tenant_id;
+   sessionStorage.setItem('lexigrid_token',token);sessionStorage.setItem('lexigrid_tenant',tenant);
+   closeModal();page='Security';await shell();
+   const status=document.getElementById('security-status');if(status)status.textContent='Authenticator enabled and verified. You are signed in. Use a fresh authenticator code for future sign-ins.';
+  }catch(e){if(modalContentIsCurrent(error))error.textContent=e.message}
+  finally{confirmButton.disabled=cancel.disabled=false}
+ };
+ cancel.onclick=async()=>{
+  if(cancel.disabled)return;confirmButton.disabled=cancel.disabled=true;
+  try{await api('/api/auth/mfa/cancel','POST',{},credential);closeModal();
+   if(token){await navigate('Security')}else await loginScreen('Authenticator setup cancelled. Sign in again.')
+  }catch(e){if(modalContentIsCurrent(error))error.textContent=e.message}
+  finally{confirmButton.disabled=cancel.disabled=false}
+ };
+}
+async function securityPage(c){c.innerHTML=`<div class="card"><h2>Account security</h2><p>Enroll a six-digit authenticator, revoke all sessions, or verify audit record signatures (auditors and administrators).</p><div class="toolbar"><button id="mfa-start">Enroll authenticator</button><button id="revoke">Revoke sessions</button><button id="verify">Verify audit</button></div><pre id="security-status" style="white-space:pre-wrap"></pre></div>`;
+const passwordCard=document.createElement('section');passwordCard.className='card';
+passwordCard.innerHTML='<h2>Change password</h2><p>Use your identity provider to change SSO credentials. For a local password, enter the current password and a new passphrase of at least 16 characters. If MFA is enabled, use a fresh authenticator code.</p><form id="password-change"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="16" required></label><label>Authenticator code (if enabled)<input name="totp_code" inputmode="numeric" maxlength="32"></label><button type="submit">Change password and sign out</button><p class="password-error error"></p></form>';
+c.append(passwordCard);
+const passwordForm=passwordCard.querySelector('form');passwordForm.onsubmit=async e=>{
+ e.preventDefault();const button=passwordForm.querySelector('button'),error=passwordForm.querySelector('.password-error');
+ if(button.disabled)return;button.disabled=true;error.textContent='';
+ const credentials=Object.fromEntries(new FormData(passwordForm));if(!credentials.totp_code)delete credentials.totp_code;
+ try{await api('/api/auth/change-password','POST',credentials);passwordForm.reset();sessionStorage.removeItem('lexigrid_token');token='';await loginScreen('Password changed. Sign in again; all previous sessions were revoked.')}catch(err){if(passwordCard.isConnected)error.textContent=err.message}finally{button.disabled=false}
+};
+const status=c.querySelector('#security-status');
+const enroll=c.querySelector('#mfa-start');
+try{const state=await api('/api/auth/mfa/status');if(!c.isConnected)return;
+ enroll.disabled=state.enabled;enroll.textContent=state.enabled?'Authenticator enabled':'Add authenticator';
+ status.textContent=state.enabled?'Authenticator protection is enabled for your account.':state.required?'Your organization requires an authenticator.':state.setup_pending?'Authenticator setup is pending, but not enabled. You can complete it later; password sign-in is available.':'Authenticator protection is optional. You can sign in with your password and add an authenticator here later.';
+}catch(e){status.textContent=e.message}
+
+enroll.onclick=async()=>{
+ if(enroll.disabled)return;
+ enroll.disabled=true;
+ status.textContent='';
+ try{
+  const enrollmentToken=token;
+  await openMfaEnrollment(enrollmentToken,()=>token===enrollmentToken,()=>c.isConnected&&token===enrollmentToken);
+ }catch(e){status.textContent=e.message}
+ finally{enroll.disabled=false}
+};
+c.querySelector('#revoke').onclick=async()=>{if(!confirm('Revoke every active session, including this one?'))return;try{await api('/api/auth/logout-all','POST',{});sessionStorage.removeItem('lexigrid_token');token='';loginScreen('Sessions revoked. Sign in again.')}catch(e){status.textContent=e.message}};
+c.querySelector('#verify').onclick=async()=>{try{status.textContent=JSON.stringify(await api('/api/audit/verify-hmac'),null,2)}catch(e){status.textContent=e.message}}}
+
+async function mailConfigurationPage(c){
+ if(!['platform_admin','tenant_admin'].includes(role)){c.innerHTML='<div class="card">Administrator privileges required.</div>';return}
+ c.innerHTML=`<div class="card"><h2>SMTP & Distributed Mail Workers</h2><p>SMTP overrides are encrypted in the database and shared by all application instances. Only platform administrators can change the global SMTP server. Passwords are never displayed. Enable <code>LEXIGRID_MAIL_WORKER=1</code> on each worker process; PostgreSQL supports concurrent workers with row locking.</p><div id="mail-config-status">Loading…</div><div class="toolbar"><button id="mail-refresh">Refresh</button><button id="mail-test">Test SMTP</button></div><div id="mail-edit"></div><pre id="mail-config-result" style="white-space:pre-wrap"></pre></div>`;
+ let current;
+ const show=async()=>{current=await api('/api/admin/mail/configuration');let v=current;
+ c.querySelector('#mail-config-status').innerHTML=`<p><b>SMTP:</b> ${v.smtp_ready?'Ready':'Not ready'} · <b>Worker:</b> ${v.mail_worker_enabled?'Enabled':'Disabled'} · <b>Configuration revision:</b> ${v.revision}</p><p><b>Host:</b> ${esc(v.smtp_host||'(unset)')} · <b>Port:</b> ${esc(v.smtp_port)} · <b>Security:</b> ${esc(v.smtp_security)} · <b>Sender:</b> ${esc(v.smtp_from||'(unset)')}</p><p><b>Username:</b> ${v.smtp_username_configured?'Configured':'Unset'} · <b>Password:</b> ${v.smtp_password_configured?'Configured':'Unset'}</p>${v.validation_errors.length?`<div class="error">${v.validation_errors.map(esc).join('<br>')}</div>`:''}`;
+ if(role==='platform_admin'){
+ let e=c.querySelector('#mail-edit');e.innerHTML=`<h3>Edit SMTP configuration</h3><form id="mail-form"><label>SMTP host<input name="host" required></label><label>Port<input name="port" type="number" min="1" max="65535" required></label><label>Security<select name="security"><option value="starttls">STARTTLS</option><option value="ssl">Implicit TLS</option></select></label><label>From address<input name="sender" type="email" required></label><label>SMTP username<input name="username"></label><label>New SMTP password (leave blank to retain existing)<input name="password" type="password" autocomplete="new-password"></label><label><input type="checkbox" name="clear_password"> Clear existing password</label><button type="submit">Save SMTP configuration</button></form><p class="muted">Changes apply on the next email send. Never paste passwords into support tickets.</p>`;
+ let f=c.querySelector('#mail-form');for(let [name,val] of Object.entries({host:v.smtp_host,port:v.smtp_port,security:v.smtp_security,sender:v.smtp_from,username:v.smtp_username}))f.elements[name].value=val||'';
+ f.onsubmit=async ev=>{ev.preventDefault();let payload={revision:current.revision,host:f.elements.host.value.trim(),port:Number(f.elements.port.value),security:f.elements.security.value,sender:f.elements.sender.value.trim(),username:f.elements.username.value.trim(),clear_password:f.elements.clear_password.checked};if(f.elements.password.value)payload.password=f.elements.password.value;else if(!payload.clear_password)delete payload.password;let o=c.querySelector('#mail-config-result');try{let r=await api('/api/admin/mail/configuration','PUT',payload);o.textContent='Saved revision '+r.revision;await show()}catch(err){o.textContent=err.message}};
+ }};
+ c.querySelector('#mail-refresh').onclick=()=>show().catch(e=>c.querySelector('#mail-config-result').textContent=e.message);
+ c.querySelector('#mail-test').onclick=async()=>{let o=c.querySelector('#mail-config-result');o.textContent='Testing…';try{o.textContent=JSON.stringify(await api('/api/admin/mail/test-connection','POST',{}),null,2)}catch(e){o.textContent=e.message}};
+ await show();
+}
+async function administration(c){
+ const me=await api('/api/me');
+ if(!['platform_admin','tenant_admin'].includes(me.role)){c.innerHTML='<div class="card">Tenant administration requires administrator privileges.</div>';return}
+ c.innerHTML='<div class="card"><h2>Tenant administration</h2><p>Provision accounts with least-privilege roles. Administrator password resets and federated identity bindings require the administrator CLI.</p><div class="toolbar"><button id="new-user">Create user in current tenant</button><button id="health-check">Health check</button></div><div id="tenant-users"></div><pre id="admin-output" style="white-space:pre-wrap"></pre></div>';
+ const tenantInfo=await api('/api/tenants/current');const tenantPanel=document.createElement('div');tenantPanel.className='card';tenantPanel.innerHTML=`<h2>Organization name</h2><p>Current: <strong>${esc(tenantInfo.name)}</strong></p><button id="rename-tenant">Rename organization</button>`;c.prepend(tenantPanel);c.querySelector('#rename-tenant').onclick=()=>form('Rename organization',[['name','Display name']],d=>api('/api/tenants/current','PUT',d));
+ c.querySelector('#new-user').onclick=()=>form('Provision tenant user', [['email','Email','email'],['password','Temporary password (16+ characters)','password'],['role','Role','select','tenant_admin|risk_manager|risk_editor|risk_viewer|auditor']],async d=>{await api('/api/users','POST',d);await refreshUsers()});
+ if(me.role==='platform_admin'){
+  const panel=document.createElement('div');panel.className='card';panel.innerHTML='<h2>Platform: Organizations</h2><p>Create a separate tenant and its first tenant administrator in one transaction. Each tenant has its own users and risk records.</p><button id="provision-tenant">Create organization + administrator</button><div id="platform-tenants"></div>';c.prepend(panel);
+  const refresh=async()=>{const rows=await api('/api/platform/tenants');c.querySelector('#platform-tenants').innerHTML=table(rows,['name','id','user_count'])};
+  c.querySelector('#provision-tenant').onclick=()=>form('Create organization and initial administrator',[['name','Organization name'],['admin_email','Administrator email','email'],['admin_password','Initial password (16+ characters)','password']],async d=>{await api('/api/platform/tenants','POST',d);await refresh()});
+  await refresh();
+ }
+ const refreshUsers=async()=>{let users=await api('/api/users');const list=c.querySelector('#tenant-users');list.innerHTML='<h3>Users in this organization</h3>'+table(users,['email','role','active'],{label:'Change access'});wireActions(list,users,{run:r=>{if(r.id===me.id||r.role==='platform_admin'){alert('Another administrator or privileged owner must change this account.');return}editForm('Change user access',[['role','Role','select','tenant_admin|risk_manager|risk_editor|risk_viewer|auditor'],['active','Active','select','true|false']],r,async d=>{await api('/api/users/'+encodeURIComponent(r.id),'PATCH',{role:d.role,active:d.active==='true',security_revision:r.security_revision});await refreshUsers()})}})};
+ await refreshUsers();
+ c.querySelector('#health-check').onclick=async()=>{try{c.querySelector('#admin-output').textContent=JSON.stringify(await api('/health'),null,2)}catch(e){c.querySelector('#admin-output').textContent=e.message}};
+}
+async function exportsPage(c){
+ c.innerHTML='<div class="card"><h2>Exports and evidence</h2><p>Download tenant-scoped risk records or audit history. Audit export requires auditor or administrator privileges.</p><div class="toolbar"><button data-url="/api/exports/risks.csv">Risk CSV</button><button data-url="/api/exports/risks.json">Risk JSON</button><button data-url="/api/exports/audit.csv">Audit CSV</button></div><pre id="export-error" class="error"></pre></div>';
+ c.querySelectorAll('button[data-url]').forEach(b=>b.onclick=async()=>{try{let r=await fetch(b.dataset.url,{headers:{Authorization:'Bearer '+token}});if(!r.ok)throw Error('Export failed: '+r.status);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=b.dataset.url.split('/').pop();a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}catch(e){document.getElementById('export-error').textContent=e.message}})
+}
+
+
+async function enterprisePage(c){
+ const schema=await api('/api/enterprise/schema');let kinds=Object.keys(schema);
+ c.innerHTML=`<div class="card"><h2>Enterprise IRM workspaces</h2><p>Manage assessments, regulatory obligations, audit workpapers, resilience plans, control tests, findings, and related governance records.</p><div class="toolbar"><select id="enterprise-kind">${kinds.map(k=>`<option value="${esc(k)}">${esc(k.replaceAll('_',' '))}</option>`).join('')}</select><button id="enterprise-create">Create record</button><button id="enterprise-refresh">Refresh</button></div><div id="enterprise-items"></div></div>`;
+ const selector=c.querySelector('#enterprise-kind');
+ const create=c.querySelector('#enterprise-create');
+ let request=0;async function refresh(){const latest=++request;const modelProposals=selector.value==='ai_recommendation';create.disabled=modelProposals;const v=await api('/api/enterprise/records?kind='+encodeURIComponent(selector.value));if(latest!==request)return;const list=c.querySelector('#enterprise-items');list.innerHTML=`<p>${v.total} records</p>`+table(v.items,['title','owner','state','version'],{label:'Review',run:()=>{}})+(modelProposals?'<p class="muted">Generate AI proposals from the risk assessment panel. Use Review for lifecycle changes.</p>':`<p class="muted">Edit record details using the buttons below; lifecycle changes remain in Review.</p>`+v.items.map((r,i)=>`<button class="enterprise-edit" data-i="${i}">Edit ${esc(r.title)}</button>`).join(' '));list.querySelectorAll('.enterprise-edit').forEach(b=>b.onclick=()=>{let r=v.items[Number(b.dataset.i)];let fields=[['title','Title'],['owner','Owner'],...Object.keys(r.data||{}).filter(k=>k!=='owner').map(k=>[k,k.replaceAll('_',' ')])];editForm('Edit '+r.title,fields,{...r,...r.data},d=>{let data={...r.data};for(let k of Object.keys(data))if(k!=='owner'&&k in d)data[k]=d[k];if('owner' in data)data.owner=d.owner;return api('/api/enterprise/records/'+r.id+'?version='+r.version,'PATCH',{kind:r.kind,title:d.title,owner:d.owner,data})})});wireActions(list,v.items,{label:'Review',run:r=>{if(r.kind==='ai_recommendation'){api('/api/risks/'+encodeURIComponent(r.data.object_id)).then(risk=>manageRisk(risk,false)).catch(error=>openModal('AI assessment review','<p class="error">'+esc(error.message)+'</p>'));return}let states=schema[r.kind].states;let next=states[states.indexOf(r.state)+1];if(!next){openModal('Record',`<p>${esc(r.title)} has reached its final configured state.</p>`);return}form('Advance: '+r.title,[['note','Transition justification','textarea']],d=>api('/api/enterprise/records/'+encodeURIComponent(r.id)+'/transition','POST',{version:r.version,state:next,note:d.note}))}})}
+ selector.onchange=refresh;c.querySelector('#enterprise-refresh').onclick=refresh;
+ create.onclick=()=>{let kind=selector.value;if(kind==='ai_recommendation')return;let fields=[['title','Title'],['owner','Owner']];for(const k of schema[kind].required_fields){if(k!=='owner')fields.push([k,k.replaceAll('_',' ')])}form('Create '+kind.replaceAll('_',' '),fields,d=>{let data={};for(const k of schema[kind].required_fields){if(k==='owner')data[k]=d.owner;else data[k]=d[k]}return api('/api/enterprise/records','POST',{kind,title:d.title,owner:d.owner,data})})};
+ await refresh();
+}
+
+
+async function workflowPage(c){
+ c.innerHTML=`<div class="card"><h2>Workflow designer</h2><p>Create a sequential approval definition with named steps, assigned user IDs and optional due dates. Publish a draft before starting a run.</p><div class="toolbar"><button id="workflow-design">Design workflow</button><button id="workflow-definitions-refresh">Refresh definitions</button></div><div id="workflow-definitions"></div></div><div class="card"><h2>Approval workflows</h2><p>Start a published workflow against an enterprise record. Only the assigned approver can decide the current step.</p><div class="toolbar"><button id="workflow-start">Start workflow</button><button id="workflow-refresh">Refresh</button></div><div id="workflow-list"></div></div><div class="card"><h2>My workflow notifications</h2><div class="toolbar"><button id="workflow-notifications-refresh">Refresh inbox</button><button id="workflow-escalate">Check overdue approvals (administrator)</button></div><div id="workflow-notifications"></div></div>`;
+ async function refreshDefinitions(){let result=await api('/api/enterprise/records?kind=workflow_definition');let el=c.querySelector('#workflow-definitions');el.innerHTML=table(result.items,['title','state','version','id'],{label:'Publish',run:()=>{}});wireActions(el,result.items,{label:'Publish',run:async r=>{if(r.state!=='draft'){alert('Only draft definitions can be published');return}try{await api('/api/enterprise/records/'+encodeURIComponent(r.id)+'/transition','POST',{version:r.version,state:'active',note:'Published by workflow designer'});await refreshDefinitions()}catch(e){alert(e.message)}}})}
+ c.querySelector('#workflow-definitions-refresh').onclick=refreshDefinitions;
+ c.querySelector('#workflow-design').onclick=()=>{openModal('Design approval workflow',`<form id="workflow-design-form"><label>Workflow name<input name="name" required maxlength="200"></label><label>Owner<input name="owner" required maxlength="200"></label><div id="workflow-steps"></div><button type="button" id="workflow-add-step">Add approval step</button><button type="submit">Save draft</button><p class="error" id="workflow-design-error"></p></form>`);let steps=document.getElementById('workflow-steps');function addStep(){if(steps.children.length>=12)return;let el=document.createElement('div');el.className='card';el.innerHTML=`<label>Step label<input class="step-label" required maxlength="100"></label><label>Approver user ID<input class="step-user" required></label><label>Due date (optional)<input type="date" class="step-due"></label><button type="button" class="remove-step">Remove step</button>`;el.querySelector('.remove-step').onclick=()=>el.remove();steps.appendChild(el)}document.getElementById('workflow-add-step').onclick=addStep;addStep();document.getElementById('workflow-design-form').onsubmit=async e=>{e.preventDefault();try{let formData=new FormData(e.target);let workflowSteps=[...steps.children].map(el=>({label:el.querySelector('.step-label').value,approver_user_id:el.querySelector('.step-user').value,...(el.querySelector('.step-due').value?{due_date:el.querySelector('.step-due').value}:{})}));if(!workflowSteps.length)throw Error('Add at least one step');let name=formData.get('name'),owner=formData.get('owner');await api('/api/enterprise/records','POST',{kind:'workflow_definition',title:name,owner,data:{name,owner,steps:workflowSteps}});closeModal();await refreshDefinitions()}catch(err){document.getElementById('workflow-design-error').textContent=err.message}}};
+ async function refresh(){let runs=await api('/api/workflows/runs'),list=c.querySelector('#workflow-list');list.innerHTML=table(runs,['object_id','state','step_index','version'],{label:'Review',run:()=>{}});wireActions(list,runs,{label:'Review',run:r=>{if(r.state!=='pending'){openModal('Workflow status',`<p>${esc(r.state)}</p>`);return}form('Decide workflow',[['decision','Decision','select','approved|rejected'],['note','Justification','textarea']],d=>api('/api/workflows/runs/'+encodeURIComponent(r.id)+'/decision','POST',{version:r.version,decision:d.decision,note:d.note}))}})}
+ async function refreshNotifications(){let rows=await api('/api/workflows/notifications'),el=c.querySelector('#workflow-notifications');
+ rows=rows.map(row=>({...row,delivery_status:(row.delivery||[]).map(item=>item.channel+': '+item.status+' ('+item.attempts+' attempts)').join('; ')||'No outbound delivery scheduled'}));el.innerHTML=table(rows,['message','created_at','read_at','delivery_status'],{label:'Mark read',run:()=>{}});wireActions(el,rows,{label:'Mark read',run:r=>api('/api/workflows/notifications/'+encodeURIComponent(r.id)+'/read','POST',{})})}
+ c.querySelector('#workflow-notifications-refresh').onclick=refreshNotifications;
+ c.querySelector('#workflow-escalate').onclick=async()=>{try{let result=await api('/api/workflows/escalations/run','POST',{});alert('Created '+result.created+' overdue notifications');await refreshNotifications()}catch(e){alert(e.message)}};
+ c.querySelector('#workflow-refresh').onclick=refresh;
+ c.querySelector('#workflow-start').onclick=()=>form('Start approval workflow',[['definition_id','Active workflow definition ID'],['object_id','Enterprise record ID'],['target_state','Requested lifecycle state (optional)']],d=>api('/api/workflows/runs','POST',d));
+ await refreshDefinitions();await refresh();await refreshNotifications();
+ if(['tenant_admin','risk_manager','platform_admin'].includes(role)){
+  const recovery=document.createElement('section');
+  recovery.className='card';
+  recovery.innerHTML='<h2>Failed workflow deliveries</h2><p>After correcting the delivery problem, request one additional attempt with a reason. An expired lease can mean the earlier send already succeeded.</p><button class="delivery-refresh">Refresh failures</button><div class="delivery-list"></div><p class="delivery-error error"></p>';
+  c.append(recovery);
+  const list=recovery.querySelector('.delivery-list'),error=recovery.querySelector('.delivery-error');
+  async function refreshRecovery(){
+   const rows=await api('/api/workflows/notifications/delivery?status=failed');
+   list.innerHTML=table(rows,['notification_id','channel','attempts','last_error'],{label:'Retry one attempt'});
+   wireActions(list,rows,{run:delivery=>form('Retry workflow delivery',
+    [['reason','Reason for one additional attempt','textarea']],async data=>{
+     await api('/api/workflows/notifications/'+encodeURIComponent(delivery.notification_id)+'/delivery/'+delivery.channel+'/retry','POST',
+      {expected_attempts:delivery.attempts,reason:data.reason});
+     await refreshRecovery();
+    })});
+  }
+  recovery.querySelector('.delivery-refresh').onclick=()=>refreshRecovery().catch(e=>error.textContent=e.message);
+  try{await refreshRecovery()}catch(e){error.textContent=e.message}
+ }
+
+}
+
+if(token)shell();else loginScreen();
+
+async function bulkImportPage(c){
+ c.innerHTML=`<div class="card"><h2>Bulk governance import</h2><p>Import CSV files for controls, policies, frameworks and framework requirements. Choose the record type to see its exact CSV format. Download that template, replace the fictional sample row with your data, preview errors, then import. Imports are tenant-scoped and atomic.</p><label for="bulkKind">Record type</label><select id="bulkKind"><option value="controls">Controls</option><option value="policies">Policies</option><option value="frameworks">Frameworks</option><option value="requirements">Framework requirements</option></select><div class="toolbar"><button id="bulkTemplate" type="button" disabled>Download Controls CSV template</button><button id="bulkFormatRetry" type="button" hidden>Retry loading CSV formats</button></div><p id="bulkDownloadStatus" role="status"></p><section id="bulkFormat" aria-live="polite"><p>Loading CSV formats…</p></section><label for="bulkOwner">Default accountable owner (controls/policies)</label><input id="bulkOwner" maxlength="200" placeholder="Used for blank owner cells"><p id="bulkOwnerHelp">A nonblank owner in an individual CSV row overrides the default. Existing control codes are skipped without changes; new controls continue importing.</p><label for="bulkFile">Completed CSV file</label><input id="bulkFile" type="file" accept=".csv,text/csv"><div class="toolbar"><button id="bulkPreview">Validate / Preview</button><button id="bulkCommit">Import validated records</button></div><pre id="bulkResult" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></div>`;
+ const kind=c.querySelector('#bulkKind'),file=c.querySelector('#bulkFile'),out=c.querySelector('#bulkResult'),defaultOwner=c.querySelector('#bulkOwner');let validated=null,schemas={},downloading=false;
+ const format=c.querySelector('#bulkFormat'),download=c.querySelector('#bulkTemplate'),retry=c.querySelector('#bulkFormatRetry'),downloadStatus=c.querySelector('#bulkDownloadStatus');
+ function showFormat(){
+  const schema=schemas[kind.value];download.disabled=!schema||downloading;
+  download.textContent='Download '+(schema?.label||kind.options[kind.selectedIndex].textContent)+' CSV template';
+  if(!schema)return;
+  format.innerHTML='<h3>'+esc(schema.label)+' CSV format</h3><p>'+esc(schema.note)+'</p><p>Every listed column is required. Keep the exact header names; column order may vary. Use one record per row.</p><div class="tablewrap"><table><thead><tr><th>CSV column</th><th>Required</th><th>Rules</th></tr></thead><tbody>'+schema.columns.map(column=>'<tr><td><code>'+esc(column.name)+'</code></td><td>Yes</td><td>'+esc(column.description)+' '+esc(column.allowed_values?'Allowed values: '+column.allowed_values.join(', ')+'.':(column.minLength?'Minimum '+column.minLength+' '+(column.minLength===1?'character':'characters')+'. ':'')+(column.maxLength?'Maximum '+column.maxLength+' characters.':''))+'</td></tr>').join('')+'</tbody></table></div><h3>Example CSV — replace the fictional sample row</h3><pre id="bulkExample" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><p>Save as UTF-8, comma-delimited CSV (not XLSX). Quote values containing commas or line breaks; double any quote inside a quoted value. Keep codes and revisions as text in Excel. No fixed row-count limit; maximum '+schema.max_file_bytes.toLocaleString()+' bytes. Existing records are not overwritten.</p><details><summary>CSV headers for all record types</summary><div class="tablewrap"><table><thead><tr><th>Record type</th><th>CSV header row</th></tr></thead><tbody>'+Object.values(schemas).map(item=>'<tr><td>'+esc(item.label)+'</td><td><code>'+esc(item.columns.map(column=>column.name).join(','))+'</code></td></tr>').join('')+'</tbody></table></div></details>';
+  c.querySelector('#bulkExample').textContent=schema.example_csv;
+ }
+ async function loadFormats(){
+  retry.hidden=true;download.disabled=true;
+  try{const response=await api('/api/bulk/schemas');if(!c.isConnected)return;schemas=response;showFormat()}
+  catch(error){if(c.isConnected){format.textContent='CSV formats could not be loaded: '+error.message;retry.hidden=false}}
+ }
+ kind.onchange=()=>{validated=null;out.textContent=downloadStatus.textContent='';defaultOwner.hidden=c.querySelector('#bulkOwnerHelp').hidden=!['controls','policies'].includes(kind.value);showFormat()};
+ defaultOwner.oninput=()=>{validated=null;out.textContent='Default owner changed. Run Validate / Preview again.'};
+ file.onchange=()=>{validated=null;out.textContent=''};
+ retry.onclick=loadFormats;
+ download.onclick=async()=>{
+  if(downloading||!schemas[kind.value])return;
+  const selected=kind.value,schema=schemas[selected];downloading=true;showFormat();downloadStatus.textContent='Downloading '+schema.label+' template…';
+  try{
+   const response=await fetch('/api/bulk/templates/'+selected,{headers:{Authorization:'Bearer '+token}});
+   if(!response.ok)throw Error('Template request failed: '+response.status+' (request '+(response.headers.get('X-Request-ID')||'unavailable')+')');
+   const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+   a.href=url;a.download=schema.template_filename;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+   if(c.isConnected)downloadStatus.textContent='Downloaded '+schema.label+' CSV template. It contains fictional examples, not existing records. Replace the sample row with your own data.';
+  }catch(error){if(c.isConnected)downloadStatus.textContent=error.message}
+  finally{downloading=false;if(c.isConnected)showFormat()}
+ };
+ const preview=c.querySelector('#bulkPreview'),commit=c.querySelector('#bulkCommit');
+ async function submit(dry){
+  const operationId=crypto.randomUUID();
+  const recordEvent=event=>api('/api/client-events','POST',{activity:'bulk_import',event,kind:kind.value,selected_count:0},token,operationId).catch(()=>console.warn('Client diagnostic could not be recorded'));
+  if(preview.disabled)return;
+  const selectedFile=file.files[0],selectedKind=kind.value;
+  if(!selectedFile){out.textContent='Select a CSV file first';recordEvent('selection_required');return}
+  if(!dry&&(validated?.file!==selectedFile||validated.kind!==selectedKind||validated.defaultOwner!==defaultOwner.value.trim())){
+   out.textContent='Run Validate / Preview first';recordEvent('source_changed');return;
+  }
+  validated=null;
+  const upload=new FormData();upload.append('file',selectedFile);if(['controls','policies'].includes(selectedKind))upload.append('default_owner',defaultOwner.value.trim());
+  for(const control of [preview,commit,file,kind,defaultOwner])control.disabled=true;
+  out.textContent='Processing…';
+  try{
+   const response=await fetch('/api/bulk/import/'+selectedKind+'?dry_run='+dry,
+    {method:'POST',headers:{Authorization:'Bearer '+token,'X-LexiGrid-Operation-ID':operationId},body:upload});
+   const result=await response.json();
+   if(!response.ok)throw Error(JSON.stringify(result.detail||result)+' (request '+(response.headers.get('X-Request-ID')||'unavailable')+')');
+   if(file.files[0]!==selectedFile||kind.value!==selectedKind)return;
+   out.textContent=JSON.stringify(result,null,2);
+   if(dry&&result.error_count===0)validated={file:selectedFile,kind:selectedKind,defaultOwner:defaultOwner.value.trim()};
+  }catch(error){out.textContent=error.message;if(error instanceof TypeError){out.textContent='Import result could not be verified. Check the target records before retrying. Reference: '+operationId;recordEvent('network_error')}}
+  finally{for(const control of [preview,commit,file,kind,defaultOwner])control.disabled=false}
+ }
+ preview.onclick=()=>submit(true);commit.onclick=()=>submit(false);
+ await loadFormats();
+}
+
+
+async function riskMethodPage(c){
+ const [catalog,history]=await Promise.all([api('/api/risk-assessment/models'),api('/api/risk-assessment/reports')]);
+ const canRun=['platform_admin','tenant_admin','risk_manager','risk_editor'].includes(role);let busy=false,offset=0;const selected=new Map(),savedInputs=new Map();
+ c.innerHTML=`<section class="card"><h2>AI risk assessment</h2><p>Choose a methodology and any number of defined risks. AI analyzes each risk and its linked records. Reports are advisory and leave official ratings unchanged. After a successful assessment, select Review rating to Keep or Apply the evidence-checked proposal with confirmation. FAIR financial estimates remain advisory and do not replace the ordinal rating.</p><label for="methodChoice">Assessment methodology</label><select id="methodChoice">${catalog.models.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('')}</select><p id="methodNotice"></p><a id="methodSource" target="_blank" rel="noopener noreferrer">Official methodology reference</a><h3>Select risks</h3><div class="toolbar"><button id="methodPrev">Previous risks</button><button id="methodNext">Next risks</button><button id="methodClear">Clear selection</button></div><p id="methodCount"></p><div id="methodRisks"></div><div id="methodInputs"></div><button id="methodRun" ${canRun?'':'disabled'}>Assess selected risks</button><p id="methodStatus" role="status" aria-live="polite"></p></section><section id="methodResult" class="card" hidden></section><section class="card"><h2>Saved reports</h2><p>Most recent 100 reports in this workspace. These preserve the assessment-time snapshot.</p><div id="methodHistory"></div></section>`;
+ const q=id=>c.querySelector('#'+id),choice=q('methodChoice'),status=q('methodStatus');
+ const factorNames={threat_events_per_year:'Threat events per year',vulnerability:'Probability a threat event becomes a loss (0–1)',primary_loss:'Primary loss per event',secondary_probability:'Probability of secondary loss (0–1)',secondary_loss:'Secondary loss when it occurs'};
+ function remember(){for(const card of q('methodInputs').querySelectorAll('[data-risk-input]')){const value={context:card.querySelector('.scenario-context').value,fair:{}};for(const input of card.querySelectorAll('[data-factor]'))value.fair[input.dataset.factor+'.'+input.dataset.part]=input.value;const previous=savedInputs.get(card.dataset.riskInput);if(!card.querySelector('.fair-currency'))value.fair=previous?.fair||{};value.currency=card.querySelector('.fair-currency')?.value??previous?.currency??'';value.basis=card.querySelector('.fair-basis')?.value??previous?.basis??'';savedInputs.set(card.dataset.riskInput,value)}}
+ function inputs(){remember();q('methodInputs').innerHTML=[...selected.values()].map(r=>{const v=savedInputs.get(r.id)||{context:'',fair:{}};return `<details data-risk-input="${esc(r.id)}"><summary>${esc(r.title)} — scenario inputs ${choice.value==='fair'?'and financial ranges':''}</summary><label>Scope, assets, threat scenario, vulnerabilities, acceptance criteria and sector details (unverified user assertions)</label><textarea class="scenario-context" maxlength="5000">${esc(v.context)}</textarea>${choice.value==='fair'?`<p>Optional FAIR factors: enter all ranges to calculate financial exposure. Leave all financial inputs blank to receive a missing-data analysis. Use a single currency. These estimates must be specific to this risk.</p><label>Currency code (e.g. USD)</label><input class="fair-currency" maxlength="3" value="${esc(v.currency||'')}">${Object.entries(factorNames).map(([key,label])=>`<fieldset><legend>${esc(label)}</legend><div class="cards">${['low','mode','high'].map(part=>`<label>${part==='mode'?'Most likely':part}<input type="number" min="0" ${['vulnerability','secondary_probability'].includes(key)?'max="1"':''} step="any" data-factor="${key}" data-part="${part}" value="${esc(v.fair[key+'.'+part]||'')}"></label>`).join('')}</div></fieldset>`).join('')}<label>Basis, data sources, period and assumptions for these ranges</label><textarea class="fair-basis" maxlength="3000">${esc(v.basis||'')}</textarea>`:''}</details>`}).join('')}
+ function notice(){const m=catalog.models.find(x=>x.id===choice.value);q('methodNotice').textContent=m.notice;q('methodSource').href=m.source;inputs()}
+ async function load(){const value=await api('/api/risks?limit=50&offset='+offset);if(!c.isConnected)return;q('methodCount').textContent=`Showing ${offset+1}-${offset+value.items.length} of ${value.total} risks. ${selected.size} selected.`;q('methodPrev').disabled=busy||offset===0;q('methodNext').disabled=busy||offset+50>=value.total;
+ q('methodRisks').innerHTML=value.items.map(r=>`<label style="display:block"><input type="checkbox" data-pick-risk="${esc(r.id)}" ${selected.has(r.id)?'checked':''} ${busy?'disabled':''}>${esc(r.title)} · ${r.score} · ${esc(r.status)}</label>`).join('');
+ for(const checkbox of q('methodRisks').querySelectorAll('[data-pick-risk]'))checkbox.onchange=()=>{const r=value.items.find(x=>x.id===checkbox.dataset.pickRisk);if(checkbox.checked)selected.set(r.id,r);else selected.delete(r.id);inputs();q('methodCount').textContent=`${selected.size} risks selected. Showing ${offset+1}-${offset+value.items.length} of ${value.total}.`}}
+ const handle=fn=>async()=>{try{await fn()}catch(error){status.textContent=error.message;status.className='error'}};
+ q('methodPrev').onclick=handle(async()=>{offset=Math.max(0,offset-50);await load()});q('methodNext').onclick=handle(async()=>{offset+=50;await load()});q('methodClear').onclick=handle(async()=>{selected.clear();inputs();await load()});choice.onchange=notice;
+ function historyRows(items){q('methodHistory').innerHTML=items.map(r=>`<p><button data-report-id="${esc(r.id)}">${esc(r.title)} — ${esc(r.status)} — ${esc(r.created_at)}</button></p>`).join('')||'<p>No saved assessment reports.</p>';for(const button of q('methodHistory').querySelectorAll('[data-report-id]'))button.onclick=handle(async()=>show(await api('/api/risk-assessment/reports/'+button.dataset.reportId)))}
+ function show(value){if(!c.isConnected)return;const report=value.report,result=q('methodResult');result.hidden=false;result.innerHTML=`<h2>${esc(report.methodology.name)} — ${esc(report.status)}</h2><p>${esc(report.methodology.notice)}</p><p>AI: ${esc(report.provider)} / ${esc(report.ai_model)}. Generating this report did not change official ratings.</p><div class="toolbar">${['json','pdf','csv'].map(fmt=>`<button data-method-export="${fmt}">Download ${fmt.toUpperCase()}</button>`).join('')}</div>${report.items.map(item=>`<article class="card"><h3>${esc(item.title)}</h3>${item.proposal_id?`<button data-review-method-risk="${esc(item.risk_id)}">Review rating: Keep or Apply</button>`:''}<p>Status: ${esc(item.status)} · Official snapshot score: ${item.official_score}</p>${item.assessment?`<p>Evidence-checked proposal: ${item.assessment.recommended_likelihood} × ${item.assessment.recommended_impact} = ${item.assessment.proposed_score} · Confidence: ${esc(item.assessment.confidence)}</p><p>${esc(item.assessment.rationale)}</p><h4>AI methodology notes - human review required</h4><p>These notes are unverified model interpretations. The evidence checks override unsupported likelihood or impact statements in them.</p>${Object.entries(item.methodology_analysis).map(([key,text])=>`<h4>${esc(key.replaceAll('_',' '))}</h4><p>${esc(text)}</p>`).join('')}<p>Evidence checks: ${esc((item.assessment.score_checks||[]).join(' '))}</p><p>Gaps: ${esc(item.missing_information.join(' '))}</p><p>Proposed treatment: ${esc(item.assessment.treatment)}</p><p>Actions: ${esc(item.assessment.actions.join(' '))}</p>${item.quantification?`<h4>Financial exposure</h4><pre style="white-space:pre-wrap">${esc(JSON.stringify(item.quantification,null,2))}</pre>`:''}`:`<p class="error">${esc(item.error)}</p>`}</article>`).join('')}`;
+ for(const button of result.querySelectorAll('[data-review-method-risk]'))button.onclick=handle(async()=>{await manageRisk(await api('/api/risks/'+button.dataset.reviewMethodRisk),false)});
+ for(const button of result.querySelectorAll('[data-method-export]'))button.onclick=handle(async()=>{const fmt=button.dataset.methodExport;button.disabled=true;try{const response=await fetch('/api/risk-assessment/reports/'+value.id+'/export/'+fmt,{headers:{Authorization:'Bearer '+token}});if(!response.ok){const body=await response.json().catch(()=>({}));throw Error('Report export failed: '+JSON.stringify(body.detail||response.status)+' (request '+(response.headers.get('X-Request-ID')||'unavailable')+')')}const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download='lexigrid-assessment-'+value.id+'.'+fmt;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}finally{button.disabled=false}})}
+ q('methodRun').onclick=handle(async()=>{if(busy||!canRun)return;if(!selected.size){status.textContent='Select at least one risk.';return}remember();const data={methodology:choice.value,risk_ids:[...selected.keys()],inputs:{}};
+ for(const id of selected.keys()){const v=savedInputs.get(id);data.inputs[id]={context:v.context};if(choice.value==='fair'&&(Object.values(v.fair).some(Boolean)||v.currency||v.basis)){const factors={currency:v.currency.toUpperCase(),basis:v.basis};for(const key of Object.keys(factorNames)){factors[key]={};for(const part of ['low','mode','high']){const raw=v.fair[key+'.'+part];if(raw===''||raw===undefined||!Number.isFinite(Number(raw)))throw Error('Complete all FAIR ranges for '+selected.get(id).title);factors[key][part]=Number(raw)}}data.inputs[id].fair=factors}}
+ busy=true;for(const input of c.querySelectorAll('input,textarea,select,button'))input.disabled=true;status.className='';status.textContent='Assessing '+selected.size+' risks using '+catalog.models.find(x=>x.id===choice.value).name+'. Each risk requires a model response; keep this page open.';
+ try{const value=await api('/api/risk-assessment/reports','POST',data);show(value);status.textContent='Report saved: '+value.report.status+'. Official risk ratings remain unchanged.';historyRows((await api('/api/risk-assessment/reports')).items)}finally{busy=false;if(c.isConnected){for(const input of c.querySelectorAll('input,textarea,select,button'))input.disabled=false;q('methodRun').disabled=!canRun;await load()}}});
+ notice();historyRows(history.items);await load();
+}
+
+async function documentExtractionPage(c){
+ c.innerHTML=`<div class="card"><h2>Extract governance records from documents</h2><p>Upload a text-based PDF, DOCX or TXT (maximum 8 MB). Choose the type to extract, compare every candidate with its source location, and fill missing fields. Scanned PDFs require OCR. Up to 1,000 PDF pages and 2 million source-text characters per review (generated PDF spacing is excluded); no fixed record-count limit. For larger documents, use page ranges and import each reviewed range before extracting the next. Unrecognized layouts may omit records.</p><label>Record type</label><select id="docKind" aria-describedby="docDestination" required><option value="">Choose records to create</option><option value="controls">Controls → Controls tab</option><option value="requirements">Requirements → Framework requirements</option><option value="frameworks">Frameworks → Frameworks tab</option><option value="policies">Policies → Policies tab</option></select><p id="docDestination" role="status" aria-live="polite">Choose a record type to see where imports will appear.</p><label>Source document</label><input type="file" id="docFile" accept=".pdf,.docx,.txt"><label for="docPageStart">PDF start page (optional)</label><input id="docPageStart" type="number" min="1" step="1" placeholder="1"><label for="docPageEnd">PDF end page (optional)</label><input id="docPageEnd" type="number" min="1" step="1" placeholder="Last page"><label id="docOwnerLabel">Default accountable owner (individual control owners override this)</label><input id="docOwner" maxlength="200" placeholder="Enter an accountable owner"><p id="docOwnerHelp">Used for rows without an individual owner. Changing it updates inherited owners in the review; clearing an individual owner restores the default.</p><button id="docExtract">Extract candidates</button><div id="docFrameworkField"><label for="docFramework">Target framework for requirements</label><select id="docFramework" aria-describedby="docFrameworkHelp"></select><p id="docFrameworkHelp">Requirements must belong to a framework. Choose one or create a target here; your extracted records and selections will be kept.</p><button id="docNewFramework" type="button">Create a target framework</button><form id="docFrameworkForm" class="card" hidden><h3>Create target framework</h3><label for="docFrameworkName">Framework name</label><input id="docFrameworkName" minlength="2" maxlength="200" required><label for="docFrameworkRevision">Revision / edition</label><input id="docFrameworkRevision" maxlength="80" required><button id="docCreateFramework" type="submit">Create framework and use as target</button><p id="docFrameworkError" class="error" role="alert"></p></form></div><div id="docSummary"></div><section id="docActions" class="card" style="position:sticky;top:8px;z-index:1"><p id="docStatus" role="status" aria-live="polite">Extract candidates, review the records and select those to import.</p><div class="toolbar"><button id="docSelectAll" type="button" disabled>Select all</button><button id="docClearSelection" type="button" disabled>Clear selection</button><button id="docImport" disabled>Import selected reviewed records</button></div><div id="docConfirm" hidden><p id="docConfirmText"></p><button id="docConfirmImport">Confirm import</button> <button id="docCancelImport">Cancel</button></div><button id="docOpenFramework" hidden>Open imported records</button></section><pre id="docMessage" role="status" aria-live="polite" style="white-space:pre-wrap"></pre><div id="docRows"></div></div>`;
+ const out=c.querySelector('#docMessage'),rows=c.querySelector('#docRows'),summary=c.querySelector('#docSummary');
+ const selector=c.querySelector('#docFramework'),file=c.querySelector('#docFile'),kind=c.querySelector('#docKind');
+ const frameworkForm=c.querySelector('#docFrameworkForm'),newFramework=c.querySelector('#docNewFramework'),frameworkName=c.querySelector('#docFrameworkName'),frameworkRevision=c.querySelector('#docFrameworkRevision'),createFramework=c.querySelector('#docCreateFramework'),frameworkError=c.querySelector('#docFrameworkError');
+ const pageStart=c.querySelector('#docPageStart'),pageEnd=c.querySelector('#docPageEnd');
+ const owner=c.querySelector('#docOwner'),extract=c.querySelector('#docExtract'),commit=c.querySelector('#docImport');
+ const fields={requirements:['reference','text'],controls:['code','title','description','owner'],frameworks:['name','revision'],policies:['code','title','body','owner']};
+ const status=c.querySelector('#docStatus'),confirmation=c.querySelector('#docConfirm'),confirmButton=c.querySelector('#docConfirmImport'),cancelButton=c.querySelector('#docCancelImport'),openFramework=c.querySelector('#docOpenFramework');
+ const selectAll=c.querySelector('#docSelectAll'),clearSelection=c.querySelector('#docClearSelection'),destinationHelp=c.querySelector('#docDestination');
+ const explicitKind=cache.documentImportKind;delete cache.documentImportKind;if(fields[explicitKind])kind.value=explicitKind;
+ function destinationText(selected=kind.value){return selected==='requirements'?'Frameworks → '+(selector.value?selector.options[selector.selectedIndex].textContent:'choose a target framework')+' → Requirements':({controls:'Controls tab',frameworks:'Frameworks tab',policies:'Policies tab'}[selected]||'Choose a record type')} 
+ let preview=null,busy=false,pending=null,knownControls=null,operationId=crypto.randomUUID();
+ function selectedCount(){return rows.querySelectorAll('.docPick:checked').length}
+ function message(text,error=false){status.textContent=text;status.className=error?'error':'';out.textContent=text}
+ function event(code){api('/api/client-events','POST',{activity:'reviewed_import',event:code,kind:kind.value,selected_count:selectedCount()},token,operationId).catch(()=>console.warn('Client diagnostic could not be recorded'))}
+ function cancelPending(){pending=null;confirmation.hidden=true}
+ function markExisting(){for(const card of rows.children){const note=card.querySelector('.docExisting');if(note)note.textContent=knownControls?.has(card.querySelector('[data-field="code"]').value.trim())?'Already exists in this workspace — will be skipped without changes.':''}}
+ rows.oninput=rows.onchange=e=>{if(e?.type==='input'&&e.target?.dataset.field==='owner'){const input=e.target;input.dataset.inheritedOwner=String(!input.value.trim());if(input.dataset.inheritedOwner==='true')input.value=owner.value.trim()}cancelPending();markExisting();updateControls(true)};
+ owner.oninput=owner.onchange=()=>{if(busy)return;for(const input of rows.querySelectorAll('[data-field="owner"]'))if(input.dataset.inheritedOwner==='true')input.value=owner.value.trim();cancelPending();updateControls(true)};
+ function updateControls(showSelection=false){
+  c.querySelector('#docFrameworkField').hidden=kind.value!=='requirements';
+  destinationHelp.textContent=fields[kind.value]?'Destination: '+destinationText()+'. '+(kind.value==='requirements'?'Creates framework requirements.':'Creates '+kind.value+' records.')+(preview?.data.document_profile?' Detected source: '+preview.data.document_profile+'. Verify that this is your intended destination.':''):'Choose a record type to see where imports will appear.';
+  owner.hidden=c.querySelector('#docOwnerLabel').hidden=c.querySelector('#docOwnerHelp').hidden=!['controls','policies'].includes(kind.value);
+  for(const control of [selector,file,kind,owner,pageStart,pageEnd,extract,newFramework,frameworkName,frameworkRevision,createFramework])control.disabled=busy;
+  extract.disabled=busy||!fields[kind.value];
+  for(const input of rows.querySelectorAll('input,textarea'))input.disabled=busy;
+  commit.disabled=busy||!!pending||!preview?.data.candidates.length;
+  confirmButton.disabled=cancelButton.disabled=busy;
+  selectAll.disabled=busy||!preview?.data.candidates.length||selectedCount()===preview.data.candidates.length;
+  clearSelection.disabled=busy||selectedCount()===0;
+  commit.textContent=fields[kind.value]?'Import selected reviewed '+kind.value+' ('+selectedCount()+')':'Choose a record type before extracting';
+  if(showSelection&&!busy&&!pending&&preview){
+   status.className='';
+   if(kind.value==='requirements'&&!selector.value)status.textContent='Create or choose a target framework before importing requirements.';
+   else status.textContent=selectedCount()+' of '+preview.data.candidates.length+' records selected. Review the fields, then select Import.';
+  }
+ }
+ function clearPreview(){preview=null;cancelPending();openFramework.hidden=true;rows.replaceChildren();summary.textContent='';updateControls()}
+ function selectRecords(checked){
+  if(busy||!preview)return;
+  cancelPending();
+  for(const checkbox of rows.querySelectorAll('.docPick'))checkbox.checked=checked;
+  updateControls(true);
+  message(checked?'Selected all '+selectedCount()+' extracted '+preview.kind+'. '+(preview.kind==='requirements'&&!selector.value?'Create or choose a target framework above before importing.':'Review the fields, then select Import.'):'Selection cleared. No records were imported.');
+  event(checked?'selection_all':'selection_cleared');
+ }
+ selectAll.onclick=()=>selectRecords(true);clearSelection.onclick=()=>selectRecords(false);
+
+ file.onchange=kind.onchange=()=>{clearPreview();out.textContent='';status.textContent=fields[kind.value]?'Destination: '+destinationText()+'. Extract candidates again.':'Choose the records you want to create before extracting.'};
+ selector.onchange=()=>{cancelPending();updateControls(true)};
+ try{
+  const frameworks=await api('/api/frameworks');
+  selector.innerHTML=frameworks.length?frameworks.map(f=>`<option value="${esc(f.id)}">${esc(f.name)} — ${esc(f.revision)}</option>`).join(''):'<option value="">No frameworks yet — create a target below</option>';
+  if(!frameworks.length){frameworkForm.hidden=false;if(kind.value==='requirements')message('No target framework exists yet. You can extract now, then enter its name and revision above to create the target without losing your review.')}
+ }catch(error){out.textContent=error.message}
+ newFramework.onclick=()=>{frameworkForm.hidden=false;frameworkName.focus()};
+ frameworkForm.onsubmit=async e=>{
+  e.preventDefault();if(busy)return;
+  const name=frameworkName.value.trim(),revision=frameworkRevision.value.trim();
+  if(name.length<2||!revision){frameworkError.textContent='Enter a framework name and revision / edition.';return}
+  const session=token;cancelPending();busy=true;frameworkError.textContent='';updateControls();
+  try{
+   const created=await api('/api/frameworks','POST',{name,revision},session,operationId);
+   if(!c.isConnected||token!==session)return;
+   const option=document.createElement('option');option.value=created.id;option.textContent=created.name+' — '+created.revision;
+   if(!selector.value)selector.replaceChildren();selector.append(option);selector.value=created.id;
+   frameworkForm.hidden=true;frameworkName.value=frameworkRevision.value='';
+   message(preview?'Target framework created and selected. '+selectedCount()+' reviewed records remain selected. Select Import, then Confirm import.':'Target framework created and selected. Choose a document and extract candidates to continue.');event('framework_created');
+  }catch(error){if(c.isConnected){frameworkError.textContent='Framework creation failed: '+error.message;message('Framework was not created. Your extracted records and selections are preserved.',true)}}
+  finally{busy=false;updateControls()}
+ };
+ updateControls();
+ pageStart.onchange=pageEnd.onchange=()=>{if(!busy)clearPreview()};
+ extract.onclick=async()=>{
+  if(busy)return;
+  const source=file.files[0],selected=kind.value;
+  if(!fields[selected]){message('Choose Controls, Requirements, Frameworks or Policies before extracting. Controls appear in the Controls tab; requirements appear under a framework.',true);return}
+  if(!source){message('Choose a document before extracting.',true);return}
+  for(const input of [pageStart,pageEnd])if(input.value&&!input.checkValidity()){message('PDF pages must be positive whole numbers.',true);return}
+  if(pageStart.value&&pageEnd.value&&Number(pageStart.value)>Number(pageEnd.value)){message('PDF start page must not exceed end page.',true);return}
+  busy=true;clearPreview();message('Extracting candidates…');
+  const upload=new FormData();upload.append('file',source);upload.append('kind',selected);
+  if(pageStart.value)upload.append('page_start',pageStart.value);if(pageEnd.value)upload.append('page_end',pageEnd.value);
+  try{
+   const response=await fetch(selected==='requirements'?'/api/documents/extract-requirements':'/api/documents/extract',
+    {method:'POST',headers:{Authorization:'Bearer '+token},body:upload});
+   const data=await response.json();
+   if(!response.ok)throw Error(JSON.stringify(data.detail||data)+' (request '+(response.headers.get('X-Request-ID')||'unavailable')+')');
+   if(file.files[0]!==source||kind.value!==selected)return;
+   knownControls=null;
+   if(selected==='controls'){try{knownControls=new Set((await api('/api/controls')).map(x=>x.code))}catch{data.warnings.push('Existing controls will be checked by the server during import.')}}
+   preview={source,data,kind:selected};
+   summary.textContent=`${data.candidate_count} candidate ${selected} from ${data.filename}.${data.total_pages?` Pages ${data.page_start}-${data.page_end} of ${data.total_pages}${data.partial_document?' (partial document)':' (complete document)'}.`:''}${data.document_profile?' Detected standard: '+data.document_profile+'.':''} Destination: ${destinationText(selected)}. Source SHA-256: ${data.sha256}. Check all text against the source.`;
+   rows.innerHTML=data.candidates.map((item,index)=>`<div class="card"><label><input type="checkbox" class="docPick"> Approve record ${index+1} for import</label><p class="muted">${esc(item.source_location||'Source location unavailable')}</p>${fields[selected].map(field=>{const value=item[field]||(field==='owner'?owner.value:'');return `<label>${esc(field)}</label>`+(['text','body','description'].includes(field)?`<textarea data-field="${field}" class="${field==='text'?'docText':''}" rows="5">${esc(value)}</textarea>`:`<input data-field="${field}" ${field==='owner'?`data-inherited-owner="${!String(item.owner||'').trim()}"`:''} class="${field==='reference'?'docRef':''}" value="${esc(value)}">`)}).join('')}<p>${esc((item.warnings||[]).join(' '))}</p>${selected==='controls'?'<p class="docExisting" role="status"></p>':''}</div>`).join('');
+   markExisting();
+   out.textContent=data.warnings.join(' ');
+  }catch(error){message('Extraction failed: '+error.message,true)}
+  finally{busy=false;updateControls(!!preview)}
+ };
+ function reviewedPayload(){
+  const items=[...rows.querySelectorAll('.docPick:checked')].map(input=>{
+   const card=input.closest('.card');
+   return Object.fromEntries(fields[preview.kind].map(field=>[field,card.querySelector('[data-field="'+field+'"]').value.trim()||(field==='owner'?owner.value.trim():'')]));
+  });
+  if(!items.length){message('Select at least one reviewed record using its approval checkbox.',true);event('selection_required');return null}
+  const seenCodes=new Set();
+  const invalid=items.some(item=>{if(preview.kind!=='controls')return Object.values(item).some(value=>!value);if(!item.code)return true;const skip=seenCodes.has(item.code)||knownControls?.has(item.code);seenCodes.add(item.code);return !skip&&knownControls!==null&&Object.values(item).some(value=>!value)});
+  if(invalid){message('Fill every required field in the selected records before importing.',true);event('fields_required');return null}
+  return preview.kind==='requirements'?{framework_id:selector.value,source_sha256:preview.data.sha256,requirements:items}:{kind:preview.kind,source_sha256:preview.data.sha256,items,...(['controls','policies'].includes(preview.kind)?{default_owner:owner.value.trim()}:{})};
+ }
+ commit.onclick=()=>{
+  if(busy)return;
+  if(!preview||file.files[0]!==preview.source||kind.value!==preview.kind){message('The source changed. Extract and review the candidates again.',true);event('source_changed');return}
+  if(kind.value==='requirements'&&!selector.value){frameworkForm.hidden=false;message('A target framework is required. Enter its name and revision above, then choose Create framework and use as target. Your selected requirements are preserved.',true);event('framework_required');frameworkName.focus();return}
+  operationId=crypto.randomUUID();const payload=reviewedPayload();if(!payload)return;
+  pending={payload,source:preview.source,kind:preview.kind};confirmation.hidden=false;
+  const target=preview.kind==='requirements'?' into '+selector.options[selector.selectedIndex].textContent:' into '+destinationText(preview.kind);
+  c.querySelector('#docConfirmText').textContent='Import '+selectedCount()+' reviewed '+preview.kind+target+'?'+(preview.kind==='controls'?' Existing codes and repeated rows will be skipped; new controls will be imported.':'');
+  message('Destination: '+destinationText()+'. Review the selection and target below, then choose Confirm import.');event('confirmation_opened');updateControls();confirmButton.focus();
+ };
+ cancelButton.onclick=()=>{cancelPending();event('cancelled');updateControls();message('Import cancelled. No records were created.')};
+ confirmButton.onclick=async()=>{
+  if(busy||!pending)return;
+  const review=pending;
+  if(!preview||review.source!==file.files[0]||review.kind!==kind.value||JSON.stringify(reviewedPayload())!==JSON.stringify(review.payload)){
+   cancelPending();updateControls();message('The selection or source changed. Review and confirm again.',true);event('source_changed');return;
+  }
+  busy=true;updateControls();message('Importing '+selectedCount()+' reviewed '+review.kind+'…');
+  try{
+   const result=await api(review.kind==='requirements'?'/api/documents/import-reviewed-requirements':'/api/documents/import-reviewed','POST',review.payload,token,operationId);
+   const target=review.payload.framework_id,destination=result.destination||{kind:review.kind,page:review.kind==='requirements'?'Frameworks':{controls:'Controls',frameworks:'Frameworks',policies:'Policies'}[review.kind],framework_id:target},location=destinationText(review.kind);clearPreview();
+   message('Imported '+result.created+' reviewed '+review.kind+(review.kind==='controls'?'; skipped '+(result.skipped_count||0)+' existing/repeated controls':'')+'. View them in '+location+'. Source hash: '+result.source_sha256+'. Import reference: '+operationId);
+   if(result.skipped?.length){const details=document.createElement('details'),heading=document.createElement('summary'),list=document.createElement('ul');heading.textContent='Skipped controls ('+result.skipped_count+')';for(const skip of result.skipped){const item=document.createElement('li');item.textContent='Item '+skip.item+': '+skip.code+' — '+(skip.reason==='duplicate_in_batch'?'Repeated in this import; first occurrence kept.':'Already exists; existing control unchanged.');list.append(item)}details.append(heading,list);summary.append(details)}
+   openFramework.textContent=review.kind==='requirements'?'Open imported requirements':'Open '+destination.page;openFramework.hidden=false;openFramework.onclick=()=>{if(destination.framework_id)cache.requirementFramework=destination.framework_id;navigate(review.kind==='requirements'?'Requirements':destination.page)};
+  }catch(error){
+   cancelPending();
+   if(error.status)message('Import failed: '+error.message,true);
+   else{message('Import result could not be verified. Check the target records before retrying. Reference: '+operationId,true);event(error instanceof TypeError?'network_error':'client_error')}
+  }finally{busy=false;updateControls()}
+ };
+}
+
+</script></body></html>

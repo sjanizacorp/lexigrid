@@ -1,0 +1,22 @@
+[Unit]
+Description=LexiGrid workflow scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lexigrid
+Group=lexigrid
+WorkingDirectory=/opt/lexigrid/LexiGrid
+EnvironmentFile=/opt/lexigrid/LexiGrid/.env.native
+Environment=LEXIGRID_REQUIRE_DB_SECURITY=1
+ExecStart=/opt/lexigrid/LexiGrid/.venv/bin/python -m app.workflow_scheduler
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

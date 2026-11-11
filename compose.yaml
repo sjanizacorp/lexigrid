@@ -1,0 +1,111 @@
+# LexiGrid customer-hosted reference deployment — terminate TLS at an approved reverse proxy.
+x-smtp-environment: &smtp-environment
+  LEXIGRID_MAIL_CONFIG_KEY: ${LEXIGRID_MAIL_CONFIG_KEY:?Set LEXIGRID_MAIL_CONFIG_KEY}
+  LEXIGRID_SMTP_HOST: ${LEXIGRID_SMTP_HOST:-}
+  LEXIGRID_SMTP_PORT: ${LEXIGRID_SMTP_PORT:-587}
+  LEXIGRID_SMTP_SECURITY: ${LEXIGRID_SMTP_SECURITY:-starttls}
+  LEXIGRID_SMTP_FROM: ${LEXIGRID_SMTP_FROM:-}
+  LEXIGRID_SMTP_USERNAME: ${LEXIGRID_SMTP_USERNAME:-${LEXIGRID_SMTP_USER:-}}
+  LEXIGRID_SMTP_PASSWORD: ${LEXIGRID_SMTP_PASSWORD:-}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: lexigrid
+      POSTGRES_USER: lexigrid_owner
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:?Set POSTGRES_OWNER_PASSWORD}
+    volumes:
+      - lexigrid_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexigrid_owner -d lexigrid"]
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://lexigrid_owner:${POSTGRES_OWNER_PASSWORD}@postgres:5432/lexigrid
+      RUNTIME_DB_PASSWORD: ${RUNTIME_DB_PASSWORD:?Set RUNTIME_DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+    command: ["sh", "-c", "alembic upgrade head && python -m app.provision_runtime"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  api:
+    build: .
+    volumes:
+      - lexigrid_logs:/app/logs
+      - ./config/logging.json:/app/config/logging.json:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      <<: *smtp-environment
+      DATABASE_URL: postgresql+psycopg://lexigrid_runtime:${RUNTIME_DB_PASSWORD}@postgres:5432/lexigrid
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:?Set AUDIT_HMAC_KEY}
+      EVIDENCE_ENCRYPTION_KEY: ${EVIDENCE_ENCRYPTION_KEY:?Set EVIDENCE_ENCRYPTION_KEY}
+      LEXIGRID_DEV_BOOTSTRAP: "0"
+      LEXIGRID_MFA_ENCRYPTION_KEY: ${LEXIGRID_MFA_ENCRYPTION_KEY:?Set LEXIGRID_MFA_ENCRYPTION_KEY}
+      LEXIGRID_MAIL_WORKER: ${LEXIGRID_MAIL_WORKER:-0}
+      LEXIGRID_KMS_PROVIDER: ${LEXIGRID_KMS_PROVIDER:-local}
+      LEXIGRID_CONJUR_URL: ${LEXIGRID_CONJUR_URL:-}
+      LEXIGRID_CONJUR_ACCOUNT: ${LEXIGRID_CONJUR_ACCOUNT:-}
+      LEXIGRID_CONJUR_LOGIN: ${LEXIGRID_CONJUR_LOGIN:-}
+      LEXIGRID_CONJUR_API_KEY: ${LEXIGRID_CONJUR_API_KEY:-}
+      LEXIGRID_CONJUR_KEY_ID: ${LEXIGRID_CONJUR_KEY_ID:-}
+      LEXIGRID_CONJUR_CA_BUNDLE: ${LEXIGRID_CONJUR_CA_BUNDLE:-}
+      LEXIGRID_SAML_SP_ENTITY_ID: ${LEXIGRID_SAML_SP_ENTITY_ID:-}
+      LEXIGRID_SAML_ACS_URL: ${LEXIGRID_SAML_ACS_URL:-}
+      LEXIGRID_SAML_IDP_ENTITY_ID: ${LEXIGRID_SAML_IDP_ENTITY_ID:-}
+      LEXIGRID_SAML_IDP_SSO_URL: ${LEXIGRID_SAML_IDP_SSO_URL:-}
+      LEXIGRID_SAML_IDP_CERT: ${LEXIGRID_SAML_IDP_CERT:-}
+      LEXIGRID_REQUIRE_MFA: ${LEXIGRID_REQUIRE_MFA:-0}
+      LEXIGRID_REQUIRE_LOCAL_MFA: ${LEXIGRID_REQUIRE_LOCAL_MFA:-0}
+      LEXIGRID_SAML_MFA_CONTEXTS: ${LEXIGRID_SAML_MFA_CONTEXTS:-https://refeds.org/profile/mfa,https://refeds.org/profile/mfa/phr}
+      LEXIGRID_SAML_LABEL: ${LEXIGRID_SAML_LABEL:-Active Directory Federation Services}
+      LEXIGRID_OIDC_ISSUER: ${LEXIGRID_OIDC_ISSUER:-}
+      LEXIGRID_OIDC_CLIENT_ID: ${LEXIGRID_OIDC_CLIENT_ID:-}
+      LEXIGRID_OIDC_CLIENT_SECRET: ${LEXIGRID_OIDC_CLIENT_SECRET:-}
+      LEXIGRID_OIDC_REDIRECT_URI: ${LEXIGRID_OIDC_REDIRECT_URI:-}
+      LEXIGRID_OIDC_MFA_ACRS: ${LEXIGRID_OIDC_MFA_ACRS:-}
+      LEXIGRID_OIDC_LABEL: ${LEXIGRID_OIDC_LABEL:-Microsoft Entra ID}
+      LEXIGRID_PUBLIC_HOST: ${LEXIGRID_PUBLIC_HOST:-}
+      LEXIGRID_ANCHOR_HMAC_KEY: ${LEXIGRID_ANCHOR_HMAC_KEY:?Set LEXIGRID_ANCHOR_HMAC_KEY}
+      LEXIGRID_AI_PROVIDER: ${LEXIGRID_AI_PROVIDER:-ollama}
+      LEXIGRID_AI_MODEL: ${LEXIGRID_AI_MODEL:-qwen2.5:7b}
+      LEXIGRID_AI_ENDPOINT: ${LEXIGRID_AI_ENDPOINT:-http://host.docker.internal:11434}
+      LEXIGRID_AI_AIRGAPPED: ${LEXIGRID_AI_AIRGAPPED:-1}
+      LEXIGRID_AI_ALLOW_CLOUD: ${LEXIGRID_AI_ALLOW_CLOUD:-0}
+      LEXIGRID_AI_LOCAL_HOSTS: ${LEXIGRID_AI_LOCAL_HOSTS:-127.0.0.1,localhost,::1,host.docker.internal}
+      LEXIGRID_AI_API_KEY: ${LEXIGRID_AI_API_KEY:-}
+      LEXIGRID_REQUIRE_DB_SECURITY: "1"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      retries: 3
+  workflow-scheduler:
+    build: .
+    environment:
+      <<: *smtp-environment
+      DATABASE_URL: postgresql+psycopg://lexigrid_runtime:${RUNTIME_DB_PASSWORD}@postgres:5432/lexigrid
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      LEXIGRID_WORKFLOW_SCAN_SECONDS: ${LEXIGRID_WORKFLOW_SCAN_SECONDS:-300}
+      LEXIGRID_SLA_ESCALATE_DAYS: ${LEXIGRID_SLA_ESCALATE_DAYS:-2}
+      LEXIGRID_NOTIFY_WEBHOOK_ENABLED: ${LEXIGRID_NOTIFY_WEBHOOK_ENABLED:-0}
+      LEXIGRID_NOTIFY_WEBHOOK_URL: ${LEXIGRID_NOTIFY_WEBHOOK_URL:-}
+      LEXIGRID_NOTIFY_EMAIL_ENABLED: ${LEXIGRID_NOTIFY_EMAIL_ENABLED:-0}
+    command: ["python", "-m", "app.workflow_scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  lexigrid_logs:
+  lexigrid_postgres:
