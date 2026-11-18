@@ -2,6 +2,8 @@
 
 LexiGrid is a self-hosted governance, risk, and compliance application. It gives risk owners, control owners, and auditors a shared place to track what can go wrong, which safeguards apply, what the evidence shows, and who owns the next action.
 
+[Download the product demo](https://github.com/sjanizacorp/lexigrid/releases/download/client/LexiGrid-Product-Demo-Natural-Voice.mp4) for an 8-minute, 52-second walkthrough of installation, configuration, administration, and sample risk and audit workflows. The video includes narration and on-screen captions.
+
 ## What you can do with LexiGrid
 
 - **Connect risks to safeguards.** Maintain a risk register and link risks to policies, controls, frameworks, and requirements. Track which safeguards address each risk and who owns the follow-up.
